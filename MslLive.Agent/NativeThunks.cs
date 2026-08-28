@@ -6,16 +6,14 @@ public static unsafe class NativeThunks
 {
     // TRoutine 形态以 Task 11 addresses.h 注释为准（result/self/other/argc/args 五参，
     // x64 单调用约定）；读参数才需要布局——apply 什么都不读，report 只读 args[0]（自校准）。
-    static bool applyLogged;
 
     [UnmanagedCallersOnly]
     public static void Apply(void* result, void* self, void* other, int argc, void* args)
     {
-        // Task 13 占位：ApplyEngine 属 Task 15。stub 若在引擎落地前触发，记一次日志后空转
-        //（batch 挡板已先行拒收，正常流程到不了这里）。
-        if (applyLogged) return;
-        applyLogged = true;
-        AgentState.Log("msl_live_apply called before ApplyEngine exists (Task 15) — no-op");
+        // 游戏线程每帧经 trampoline 进这里：Phase 2 整批指针写（无 pending 时立刻返回）。
+        // 绝不抛托管异常出 UCO 边界——Pump 内部不自抛，这里再兜一层保险（崩 = 崩游戏）。
+        try { ApplyEngine.Pump(); }
+        catch (Exception ex) { AgentState.Log("pump guard: " + ex.Message); }
     }
 
     [UnmanagedCallersOnly]

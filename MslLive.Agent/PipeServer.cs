@@ -5,7 +5,9 @@ namespace MslLive.Agent;
 
 /// <summary>\\.\pipe\msl-live-&lt;pid&gt; 单客户端服务。后台线程自持，永远不阻塞游戏线程。
 /// 首连跑自检（结果进 hello）；helloAck 拒收 → 关连接继续监听（MSL 可能换版本重来）。
-/// proof 走 ProofVerify + Trampoline（Task 14）；batch 仍是 Task 15 的诚实挡板：明确回错，绝不假装成功。</summary>
+/// proof 走 ProofVerify + Trampoline（Task 14）；batch 走 ApplyEngine 两阶段（Task 15）：
+/// Phase 1 失败立即回执；成功则等游戏线程 Pump 完置出站信箱，本循环在接收超时间隙轮询转发
+/// （游戏线程写 pipe 可能阻塞 VM——MSL 30s 超时兜底，游戏暂停 = 诚实超时）。</summary>
 public static class PipeServer
 {
     static bool started;
@@ -56,9 +58,12 @@ public static class PipeServer
         var ack = Wire.Decode<HelloAck>(d0);
         if (!ack.Accept) { AgentState.Log("MSL rejected: " + ack.Reason); return; }
 
+        var rx = new Wire.ReceiveState();
         while (true)
         {
-            var (type, data) = Wire.Receive(s);
+            var msg = Wire.TryReceive(s, rx, 200);
+            if (msg == null) { FlushReceipt(s); continue; }   // 空闲间隙：转发 Pump 完成的回执
+            var (type, data) = msg.Value;
             switch (type)
             {
                 case "queryBlanks":
@@ -86,21 +91,32 @@ public static class PipeServer
                     break;
                 }
                 case "batch":
-                    // Task 15 接管前的诚实挡板
+                {
                     var b = Wire.Decode<BatchMsg>(data);
-                    Wire.Send(s, "receipt", new BatchReceipt
+                    if (b.Ops.Count == 0)   // 空批 = vacuous 成功，立即回执（否则无 op 可泵、回执永远不来）
                     {
-                        BatchSeq = b.BatchSeq,
-                        AllOk = false,
-                        Ops = b.Ops.Select(o => new OpReceipt
-                        { Seq = o.Seq, Entry = o.Entry, Ok = false, Stage = "validate", Reason = "apply not implemented" }).ToList(),
-                    });
+                        Wire.Send(s, "receipt", new BatchReceipt { BatchSeq = b.BatchSeq, AllOk = true });
+                        break;
+                    }
+                    var failed = ApplyEngine.Enqueue(b);
+                    if (failed != null)   // Phase 1 整批弃（spec D4）→ 立即回执，无 Pump 必要
+                        Wire.Send(s, "receipt", new BatchReceipt
+                        { BatchSeq = b.BatchSeq, AllOk = false, Ops = failed });
+                    // 成功入队：回执待游戏线程 Pump 完成后进出站信箱，由本循环超时轮询转发
                     break;
+                }
                 default:
                     AgentState.Log("unknown msg: " + type);
                     break;
             }
+            FlushReceipt(s);
         }
+    }
+
+    static void FlushReceipt(NamedPipeServerStream s)
+    {
+        var r = ApplyEngine.TryTakeReceipt();
+        if (r != null) Wire.Send(s, "receipt", r);
     }
 
     static void SelfCheck()

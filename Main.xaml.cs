@@ -214,6 +214,9 @@ namespace ModShardLauncher
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             HotReload.DevMode.OnAppExit();
+            // Task 15：Dev 组件随 MSL 退出卸载（游戏运行中则留置——Installer 自己判）
+            if (HotReload.DevMode.Active && !string.IsNullOrEmpty(DataLoader.dataPath))
+                HotReload.DevModeInstaller.Uninstall(Path.GetDirectoryName(DataLoader.dataPath)!);
             Settings.SaveSettings();
         }
     }

@@ -6,7 +6,8 @@ using Xunit;
 
 namespace MslLive.Test;
 
-/// <summary>fake client 走完到 proofAck（trampoline 门）/batch 挡板的剧本；断言 hello 字段与错误串。
+/// <summary>fake client 走完握手 → proofAck（trampoline 门）→ batch（ApplyEngine 接管）的剧本；
+/// 断言 hello 字段与错误串。
 /// 测试进程里自检必走 fail 路径（无常量 → NodeIndex 0 节点 / Registry 全局不可读）——
 /// 这正好把 hello 的 AgentStatus 上报通道一并验证。</summary>
 public class PipeProtocolTests : IDisposable
@@ -73,7 +74,9 @@ public class PipeProtocolTests : IDisposable
         var receipt = Wire.Decode<BatchReceipt>(d3);
         Assert.Equal(7, receipt.BatchSeq);
         Assert.False(receipt.AllOk);
-        Assert.Equal("apply not implemented", receipt.Ops[0].Reason);   // Task 15 挡板
+        // Task 15 接管后：测试进程 NodeIndex 为空 → Phase 1 resolve 失败立即回执（无 Pump 必要）
+        Assert.Equal("resolve", receipt.Ops[0].Stage);
+        Assert.Equal("node not found", receipt.Ops[0].Reason);
     }
 
     [Fact]

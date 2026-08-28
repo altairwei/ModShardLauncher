@@ -65,7 +65,7 @@ public static class VarCalibrator
             errors.Add($"{entry}: var {sem.Var} live operand unresolved (0x{operand:X8})");
             return;
         }
-        string key = Translator.KeyFor(sem.Inst, sem.Var);
+        string key = Translator.KeyFor(sem.Inst, sem.Var!);
         int id = (int)low - 100000;
         map[key] = id;
         if (AgentState.VarMap?.TryGetValue(key, out int sim) == true && sim != id)
