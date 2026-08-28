@@ -32,6 +32,8 @@ namespace ModShardLauncher.Controls
             try
             {
                 UtilsPacker.Pack(Msl.ThrowIfNull(DataContext as ModSource).Path);
+                if (ModShardLauncher.HotReload.DevMode.Active)
+                    _ = ModInfos.Instance.CompileDataWinFlow(true);   // 一键串联（spec §4.3）：打包 → 编译 → 热推
             }
             catch(Exception ex)
             {

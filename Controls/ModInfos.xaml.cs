@@ -26,7 +26,9 @@ namespace ModShardLauncher.Controls
             await DataLoader.DoOpenDialog();
             Main.Instance.Refresh();
         }
-        private async void Save_Click(object sender, EventArgs e)
+        private async void Save_Click(object sender, EventArgs e) => await CompileDataWinFlow(false);
+
+        internal async Task CompileDataWinFlow(bool useLastSavePath)
         {
             if (DataLoader.data.FORM == null)
             {
@@ -36,7 +38,7 @@ namespace ModShardLauncher.Controls
 
             bool patchSucess = false;
 
-            try 
+            try
             {
                 ModLoader.PatchFile();
                 Log.Information("Successfully patch vanilla");
@@ -52,18 +54,37 @@ namespace ModShardLauncher.Controls
             }
 
             // attempt to save the patched data
-            if (patchSucess) 
+            if (patchSucess)
             {
-                Task<bool> save = DataLoader.DoSaveDialog();
-                await save;
-                if (!save.Result) Log.Information("Saved cancelled.");
-                // copy the dataloot.json in the stoneshard directory
-                LootUtils.SaveLootTables(Msl.ThrowIfNull(Path.GetDirectoryName(DataLoader.savedDataPath)));
+                bool saved;
+                if (useLastSavePath && !string.IsNullOrEmpty(DataLoader.savedDataPath))
+                {
+                    await DataLoader.SaveFile(DataLoader.savedDataPath);
+                    saved = true;
+                }
+                else
+                {
+                    saved = await DataLoader.DoSaveDialog();
+                }
+                if (saved)
+                {
+                    // copy the dataloot.json in the stoneshard directory
+                    LootUtils.SaveLootTables(Msl.ThrowIfNull(Path.GetDirectoryName(DataLoader.savedDataPath)));
+                    // 双输出（spec §4.4）：写盘已完成 → 热推；热通道失败不影响写盘结果
+                    HotReload.DevMode.ReportResult(HotReload.HotPipeline.BuildAndPush(DataLoader.data, DataLoader.savedDataPath));
+                }
+                else Log.Information("Saved cancelled.");
             }
 
             // reload the data
             await DataLoader.LoadFile(DataLoader.dataPath, true);
             Main.Instance.Refresh();
+        }
+
+        /// <summary>热更三态反馈行（spec §8；Dev 关时 ReportResult 不走到这里）。</summary>
+        public void SetLiveStatus(string msg)
+        {
+            if (LiveStatus != null) LiveStatus.Text = msg;
         }
 
         private void Server_Click(object sender, EventArgs e)

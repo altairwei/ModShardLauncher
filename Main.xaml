@@ -132,13 +132,15 @@
                                 <ImageBrush x:Key="OverSource" ImageSource="/Resources/Sprites/min_over.png"/>
                             </local:MyToggleButton.Resources>
                         </local:MyToggleButton>
-                        <local:MyToggleButton ImageSource="/Resources/Sprites/close.png" Text="{DynamicResource Close}" 
+                        <local:MyToggleButton ImageSource="/Resources/Sprites/close.png" Text="{DynamicResource Close}"
                                               Click="MyToggleButton_Click">
                             <local:MyToggleButton.Resources>
                                 <ImageBrush x:Key="DownSource" ImageSource="/Resources/Sprites/close_down.png"/>
                                 <ImageBrush x:Key="OverSource" ImageSource="/Resources/Sprites/close_over.png"/>
                             </local:MyToggleButton.Resources>
                         </local:MyToggleButton>
+                        <TextBlock x:Name="DevIndicator" Text="DEV" Foreground="OrangeRed" FontWeight="Bold"
+                                   Visibility="Collapsed" VerticalAlignment="Center" Margin="8,0"/>
                     </StackPanel>
                     <Border BorderBrush="#43424D" BorderThickness="4"/>
                     <Border BorderBrush="#2C2D39" BorderThickness="3"/>

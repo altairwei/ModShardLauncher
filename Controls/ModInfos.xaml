@@ -35,6 +35,8 @@
                 </controls:MyToggleButton>
                 <Border BorderBrush="#43424D" BorderThickness="2"/>
             </Grid>
+            <TextBlock x:Name="LiveStatus" Text="" Foreground="Gray" Margin="4,68,4,0"
+                       VerticalAlignment="Top" HorizontalAlignment="Left"/>
             <controls:MyItemsControl MaxHeight="672" Height="672" x:Name="ModList"
                                      VerticalAlignment="Bottom" 
                                      ItemsSource="{Binding Path=Mods, RelativeSource={RelativeSource AncestorType=controls:ModInfos, Mode=FindAncestor}}"/>

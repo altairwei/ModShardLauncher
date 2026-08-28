@@ -41,6 +41,8 @@ namespace ModShardLauncher.Controls
                     UserSettings.ChangeLanguage(2);
                     break;
             }
+
+            InitDevBlock();
         }
         public int selectIndex { get; set; } = 1;
         public List<string> Languages { get; set; } = new List<string>();
@@ -63,6 +65,53 @@ namespace ModShardLauncher.Controls
         {
             Main.Settings.EnableLogger = Msl.ThrowIfNull(Logger.IsChecked);
             UserSettings.CheckLog(Main.Settings.EnableLogger);
+            Main.Settings.SaveSettings();
+        }
+
+        void InitDevBlock()
+        {
+            DevModeToggle.IsChecked = Main.Settings.DevMode;
+            LiveScriptSlotsBox.Text = Main.Settings.LiveScriptSlots.ToString();
+            LiveShellObjectsBox.Text = Main.Settings.LiveShellObjects.ToString();
+            LiveEmptyRoomsBox.Text = Main.Settings.LiveEmptyRooms.ToString();
+            LiveBlankSpritesBox.Text = Main.Settings.LiveBlankSprites.ToString();
+            LiveBlankPathsBox.Text = Main.Settings.LiveBlankPaths.ToString();
+            LiveShellParentsBox.Text = Main.Settings.LiveShellParents;
+        }
+
+        private void DevModeToggle_Changed(object sender, RoutedEventArgs e)
+        {
+            Main.Settings.DevMode = DevModeToggle.IsChecked == true;
+            Main.Settings.SaveSettings();
+        }
+
+        int CurrentQuota(TextBox box)
+        {
+            if (box == LiveScriptSlotsBox) return Main.Settings.LiveScriptSlots;
+            if (box == LiveShellObjectsBox) return Main.Settings.LiveShellObjects;
+            if (box == LiveEmptyRoomsBox) return Main.Settings.LiveEmptyRooms;
+            if (box == LiveBlankSpritesBox) return Main.Settings.LiveBlankSprites;
+            return Main.Settings.LiveBlankPaths;
+        }
+
+        private void QuotaBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            var box = Msl.ThrowIfNull(sender as TextBox);
+            if (int.TryParse(box.Text, out int v) && v >= 0)
+            {
+                if (box == LiveScriptSlotsBox) Main.Settings.LiveScriptSlots = v;
+                else if (box == LiveShellObjectsBox) Main.Settings.LiveShellObjects = v;
+                else if (box == LiveEmptyRoomsBox) Main.Settings.LiveEmptyRooms = v;
+                else if (box == LiveBlankSpritesBox) Main.Settings.LiveBlankSprites = v;
+                else if (box == LiveBlankPathsBox) Main.Settings.LiveBlankPaths = v;
+                Main.Settings.SaveSettings();
+            }
+            else box.Text = CurrentQuota(box).ToString();   // 解析失败恢复原值
+        }
+
+        private void ShellParentsBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            Main.Settings.LiveShellParents = LiveShellParentsBox.Text;
             Main.Settings.SaveSettings();
         }
     }

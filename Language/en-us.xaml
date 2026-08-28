@@ -8,6 +8,8 @@
     <sys:String x:Key="FileHeader_Open">Open</sys:String>
     <sys:String x:Key="SettingHeader_Lang">Languages</sys:String>
     <sys:String x:Key="SettingHeader_Log">Enable logger</sys:String>
+    <sys:String x:Key="DevModeToggle">Dev mode (hot reload)</sys:String>
+    <sys:String x:Key="DevQuotasHint">Live pools: scripts / shells / rooms / sprites / paths, shell parents (csv)</sys:String>
     <sys:String x:Key="RefreshButtonText">Refresh</sys:String>
     <sys:String x:Key="PatchButtonText">Patch</sys:String>
     <sys:String x:Key="SearchBoxText">Search by mod's name...</sys:String>

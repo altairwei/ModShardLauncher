@@ -165,6 +165,7 @@ namespace ModShardLauncher
         }
         public void Refresh()
         {
+            DevIndicator.Visibility = Settings.DevMode ? Visibility.Visible : Visibility.Collapsed;
             ModPage = new ModInfos();
             ModSourcePage = new ModSourceInfos();
             Settings settingCache = new();
@@ -212,6 +213,7 @@ namespace ModShardLauncher
 
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            HotReload.DevMode.OnAppExit();
             Settings.SaveSettings();
         }
     }

@@ -8,6 +8,8 @@
     <sys:String x:Key="FileHeader_Open">打开</sys:String>
     <sys:String x:Key="SettingHeader_Lang">语言</sys:String>
     <sys:String x:Key="SettingHeader_Log">启用Logger</sys:String>
+    <sys:String x:Key="DevModeToggle">Dev 模式（热加载）</sys:String>
+    <sys:String x:Key="DevQuotasHint">热加载池配额：脚本/壳对象/空房间/精灵/路径，壳父类桶（逗号分隔）</sys:String>
     <sys:String x:Key="RefreshButtonText">刷新</sys:String>
     <sys:String x:Key="PatchButtonText">加载</sys:String>
     <sys:String x:Key="SearchBoxText">以模组名称搜索...</sys:String>

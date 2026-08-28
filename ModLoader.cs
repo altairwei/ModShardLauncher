@@ -229,6 +229,9 @@ namespace ModShardLauncher
             PatchMods();
             // add the new loot related functions if there is any
             LootUtils.InjectLootScripts();
+            // Dev 模式静态 pass（Task 8）：槽位池/壳/空房间/live-manager——普通用户编译零注入
+            if (HotReload.DevMode.Active)
+                HotReload.LiveStubInjector.Inject(Data, HotReload.DevMode.Quotas);
         }
         internal static void PatchInnerFile()
         {

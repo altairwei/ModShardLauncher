@@ -326,5 +326,61 @@
             </CheckBox.Style>
         </CheckBox>
 
+        <CheckBox HorizontalAlignment="Left" Margin="32,140,0,0" VerticalAlignment="Top" Name="DevModeToggle"
+                  Content="{DynamicResource DevModeToggle}" Foreground="#95796A"
+                  Checked="DevModeToggle_Changed" Unchecked="DevModeToggle_Changed">
+            <CheckBox.Style>
+                <Style TargetType="CheckBox">
+                    <Setter Property="IsChecked" Value="False"/>
+                    <Setter Property="Background" Value="Transparent"/>
+                    <Setter Property="BorderThickness" Value="0"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="CheckBox">
+                                <DockPanel Background="{TemplateBinding Background}"
+                                               LastChildFill="False" Width="{TemplateBinding Width}"
+                                               RenderOptions.BitmapScalingMode="NearestNeighbor">
+                                    <Image Margin="2,0,4,2" DockPanel.Dock="Left" Height="25" Width="25"
+                                               x:Name="_img" Stretch="Fill" Source="/Resources/Sprites/checkbox_0.png"/>
+                                    <TextBlock DockPanel.Dock="Left" Foreground="{TemplateBinding Foreground}"
+                                                   Margin="2,0,0,0" VerticalAlignment="Center"
+                                                   Text="{TemplateBinding Content}"/>
+                                </DockPanel>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsChecked" Value="True">
+                                        <Setter TargetName="_img" Property="Source" Value="/Resources/Sprites/checkbox_1.png"/>
+                                    </Trigger>
+                                    <Trigger Property="IsChecked" Value="{x:Null}">
+                                        <Setter TargetName="_img" Property="Source" Value="/Resources/Sprites/checkbox_2.png"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </CheckBox.Style>
+        </CheckBox>
+        <TextBlock Text="{DynamicResource DevQuotasHint}" VerticalAlignment="Top" Margin="32,176,0,0"
+                   Style="{StaticResource xFont}" FontSize="9" Foreground="#95796A"
+                   Width="540" TextWrapping="Wrap"/>
+        <TextBox x:Name="LiveScriptSlotsBox" VerticalAlignment="Top" HorizontalAlignment="Left"
+                 Margin="32,204,0,0" Width="48" Background="#11101A" Foreground="#95796A"
+                 BorderBrush="#43424D" LostFocus="QuotaBox_LostFocus"/>
+        <TextBox x:Name="LiveShellObjectsBox" VerticalAlignment="Top" HorizontalAlignment="Left"
+                 Margin="92,204,0,0" Width="48" Background="#11101A" Foreground="#95796A"
+                 BorderBrush="#43424D" LostFocus="QuotaBox_LostFocus"/>
+        <TextBox x:Name="LiveEmptyRoomsBox" VerticalAlignment="Top" HorizontalAlignment="Left"
+                 Margin="152,204,0,0" Width="48" Background="#11101A" Foreground="#95796A"
+                 BorderBrush="#43424D" LostFocus="QuotaBox_LostFocus"/>
+        <TextBox x:Name="LiveBlankSpritesBox" VerticalAlignment="Top" HorizontalAlignment="Left"
+                 Margin="212,204,0,0" Width="48" Background="#11101A" Foreground="#95796A"
+                 BorderBrush="#43424D" LostFocus="QuotaBox_LostFocus"/>
+        <TextBox x:Name="LiveBlankPathsBox" VerticalAlignment="Top" HorizontalAlignment="Left"
+                 Margin="272,204,0,0" Width="48" Background="#11101A" Foreground="#95796A"
+                 BorderBrush="#43424D" LostFocus="QuotaBox_LostFocus"/>
+        <TextBox x:Name="LiveShellParentsBox" VerticalAlignment="Top" HorizontalAlignment="Left"
+                 Margin="32,232,0,0" Width="380" Background="#11101A" Foreground="#95796A"
+                 BorderBrush="#43424D" LostFocus="ShellParentsBox_LostFocus"/>
+
     </Grid>
 </UserControl>
