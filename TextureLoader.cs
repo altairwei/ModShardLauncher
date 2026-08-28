@@ -52,6 +52,8 @@ namespace ModShardLauncher
         public static BestFitHeuristic FitHeuristic;
         public static List<Atlas> Atlasses;
         public static Regex sprFrameRegex = new(@"^(.+?)(?:_(-*\d+))*$", RegexOptions.Compiled);
+        // 热加载：本次 compile 触碰的（精灵,帧,源PNG哈希）扫描记录；LoadTextures 逐 mod 重建，热通道只读
+        public static List<HotReload.LiveTextureEntry> LiveScan = new();
         public static UndertaleData Data => DataLoader.data;
         public TextureLoader()
         {
@@ -61,6 +63,7 @@ namespace ModShardLauncher
         }
         public static void LoadTextures(ModFile mod)
         {
+            LiveScan.RemoveAll(e => e.ModName == mod.Name);   // 同一 mod 重跑先清旧记录（幂等）
             Process(mod, 2048, 2, false);
             foreach (Atlas atlas in Atlasses)
             {
@@ -331,6 +334,22 @@ namespace ModShardLauncher
                         };
                         Log.Information(string.Format("Successfully load texture {0}", fileChunk.name));
                         SourceTextures.Add(textureInfo);
+
+                        // 热加载：记录（精灵, 帧, 源PNG哈希）对账条目——复用上面已读的 byteFile，不二次 GetFile
+                        string strippedScan = Path.GetFileNameWithoutExtension(fileChunk.name.Split("\\")[^1]);
+                        System.Text.RegularExpressions.Match scanMatch = sprFrameRegex.Match(strippedScan);
+                        if (scanMatch.Success)
+                        {
+                            int.TryParse(scanMatch.Groups[2].Value, out int scanFrame);
+                            LiveScan.Add(new HotReload.LiveTextureEntry
+                            {
+                                SpriteName = scanMatch.Groups[1].Value,
+                                Frame = scanFrame,
+                                ModName = modFile.Name,
+                                FileName = fileChunk.name,
+                                Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(byteFile)),
+                            });
+                        }
                     }
                     else
                     {
