@@ -215,6 +215,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="HotReload\assetkinds.json" />
     <EmbeddedResource Update="Resources\Codes\CodeResources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>CodeResources.Designer.cs</LastGenOutput>
