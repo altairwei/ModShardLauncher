@@ -11,9 +11,10 @@ public class VarIdSimulatorTests
     /// <b>结构不变量</b>——每一条都直接对应一项实测 runner 行为，不是模拟器自身输出的循环论证：
     /// 局部声明序连续（646..649）、st* 族连续（312..315）、spr/waterDrawState 邻接（1215/1216）、
     /// 同名同 id、内置不占装载序（sprite_index=26/argument0=0x5D 是 smallId 而非 loadOrderId）。
-    /// 绝对基准值（646 本身）<b>故意不钉</b>：探针 v1–v8 证明静态模拟有未消化的系统性偏移
-    /// （早窗 -3、中窗 +1，共 4 个未识别名字），精确化是 Task 11（exe 内置变量表收割 +
-    /// 运行实例复测）的既定 scope。届时恢复绝对断言：i:_borderLeft==646 … i:_borderBottom==649。</summary>
+    /// 绝对基准值（646 本身）<b>故意不钉</b>：Task 7 探针证明静态模拟有系统性偏移
+    /// （早窗 -3、中窗 +1，净 -2）；Task 11 用 exe 内置表（218 条）做全轨迹交叉，证伪了
+    /// 内置误分类/提取遗漏/按名单去重三种假说——偏移源自 runner 编译顺序与 CODE 文件序的
+    /// 细微差别，静态不可解，精确化由 Task 14 agent 活体自校准承担（见 VarIdSimulator 注释）。</summary>
     [Fact]
     public void Simulate_ReproducesMeasuredStructuralInvariants()
     {

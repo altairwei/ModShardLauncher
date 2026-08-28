@@ -5,4 +5,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>MslLive.Shared</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="BuiltinVars.json" />
+  </ItemGroup>
 </Project>
