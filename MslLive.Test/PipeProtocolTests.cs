@@ -6,7 +6,7 @@ using Xunit;
 
 namespace MslLive.Test;
 
-/// <summary>fake client 走完到 proofAck/batch 挡板的剧本；断言 hello 字段与挡板错误串。
+/// <summary>fake client 走完到 proofAck（trampoline 门）/batch 挡板的剧本；断言 hello 字段与错误串。
 /// 测试进程里自检必走 fail 路径（无常量 → NodeIndex 0 节点 / Registry 全局不可读）——
 /// 这正好把 hello 的 AgentStatus 上报通道一并验证。</summary>
 public class PipeProtocolTests : IDisposable
@@ -59,8 +59,12 @@ public class PipeProtocolTests : IDisposable
         var (t2, d2) = Wire.Receive(c);
         Assert.Equal("proofAck", t2);
         var proofAck = Wire.Decode<ProofAck>(d2);
+        // Task 14 接管后：空 proof 的编码自证 trivially 过（0 op），但测试进程没有 dummy stub 节点，
+        // 原生函数也没注册 → trampoline 装不上 → fail-closed 整个拒掉，绝不假装成功
         Assert.False(proofAck.Ok);
-        Assert.Equal("encoder not implemented", proofAck.Error);   // Task 14 挡板
+        Assert.Equal(0, proofAck.Verified);
+        Assert.Contains("trampoline install failed", proofAck.Error);
+        Assert.Contains("native not registered", proofAck.Error);   // 两个 stub 都装不上，LastError 为末次
         Assert.Equal(42, AgentState.VarMap!["i:x"]);               // vars 已存
 
         Wire.Send(c, "batch", new BatchMsg { BatchSeq = 7, Ops = { new OpMsg { Seq = 0, Entry = "e" } } });

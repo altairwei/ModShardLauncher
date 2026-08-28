@@ -67,6 +67,30 @@ public class LiveStubInjectorTests : IDisposable
             i => i.Function?.Target?.Name?.Content == "msl_live_apply");
     }
 
+    /// <summary>dummy stub（"return 0;"）的编译形态钉版：Task 14 的 Trampoline 收尾字节校验
+    /// 以它为基准（pushi.e 0 + conv.i.v + ret.v = 12 字节，探针实测）。编译器输出若变，本测试红 =
+    /// MslLive.Test 的 Trampoline fixture 同步过期。</summary>
+    [Fact]
+    public void StubDummy_CompilesTo_PushiZeroRetV()
+    {
+        var data = Load();
+        LiveStubInjector.Inject(data, new LiveQuotas());
+        var code = data.Code.First(c => c.Name.Content == LiveStubInjector.ApplyFn);
+        // 实测形态（vendored dll 编译器，探针读出）：pushi.e 0 → conv.i.v → ret.v
+        // = 12 字节 00 00 0F 84 | 00 00 52 07 | 00 00 05 9C
+        Assert.Equal(3, code.Instructions.Count);
+        var push = code.Instructions[0];
+        Assert.Equal(UndertaleInstruction.Opcode.PushI, push.Kind);
+        Assert.Equal((short)0, Assert.IsType<short>(push.Value));
+        var conv = code.Instructions[1];
+        Assert.Equal(UndertaleInstruction.Opcode.Conv, conv.Kind);
+        Assert.Equal(UndertaleInstruction.DataType.Int32, conv.Type1);
+        Assert.Equal(UndertaleInstruction.DataType.Variable, conv.Type2);
+        var ret = code.Instructions[2];
+        Assert.Equal(UndertaleInstruction.Opcode.Ret, ret.Kind);
+        Assert.Equal(UndertaleInstruction.DataType.Variable, ret.Type1);
+    }
+
     [Fact]
     public void Inject_Twice_IsIdempotent()
     {

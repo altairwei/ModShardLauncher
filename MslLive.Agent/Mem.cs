@@ -18,6 +18,7 @@ public static unsafe class Mem
     }
 
     [DllImport("kernel32.dll")] static extern nuint VirtualQuery(ulong addr, out MemInfo info, nuint len);
+    [DllImport("kernel32.dll")] static extern ulong VirtualAlloc(ulong addr, nuint size, uint type, uint protect);
 
     const uint MEM_COMMIT = 0x1000;
     const uint MEM_PRIVATE = 0x20000;
@@ -136,5 +137,72 @@ public static unsafe class Mem
             buf[n++] = c;
         }
         return Encoding.ASCII.GetString(buf, 0, n);
+    }
+
+    /// <summary>整块读（proof 读回活 buffer 用）。守卫失败 → 空数组（fail-closed：调用方按长度不符处理）。</summary>
+    public static byte[] ReadBytes(ulong addr, int len)
+    {
+        if (len <= 0 || addr == 0) return Array.Empty<byte>();
+        if (!Readable(addr, len)) return Array.Empty<byte>();
+        var buf = new byte[len];
+        if (TestMap != null) Array.Copy(TestMap, (int)(addr - TestBase), buf, 0, len);
+        else Marshal.Copy((nint)addr, buf, 0, len);
+        return buf;
+    }
+
+    // ---- 写原语（Task 14 trampoline / Task 15 apply 共用）----
+
+    static bool Writable(ulong addr, int len)
+    {
+        if (TestMap != null)
+            return addr >= TestBase && addr - TestBase + (ulong)len <= (ulong)TestMap.LongLength;
+        return VirtualQuery(addr, out var m, MbiSize) != 0
+            && m.State == MEM_COMMIT && addr >= m.BaseAddress
+            && addr - m.BaseAddress + (ulong)len <= m.RegionSize
+            && (m.Protect & 0xFF) is 0x04 or 0x40;   // READWRITE / EXECUTE_READWRITE
+    }
+
+    /// <summary>进程内直写（游戏线程上就是普通指针写）。目标不可写 → 静默丢弃并记日志——
+    /// 注入组件纪律：绝不崩游戏；调用方负责在写入后读回校验（trampoline/proof 都会）。</summary>
+    public static void WriteU64(ulong addr, ulong v)
+    {
+        if (TestMap != null)
+        {
+            if (Writable(addr, 8)) BitConverter.TryWriteBytes(TestMap.AsSpan((int)(addr - TestBase), 8), v);
+            return;
+        }
+        if (!Writable(addr, 8)) { AgentState.Log($"WriteU64 to unwritable 0x{addr:X} dropped"); return; }
+        *(ulong*)addr = v;
+    }
+
+    public static void WriteU32(ulong addr, uint v)
+    {
+        if (TestMap != null)
+        {
+            if (Writable(addr, 4)) BitConverter.TryWriteBytes(TestMap.AsSpan((int)(addr - TestBase), 4), v);
+            return;
+        }
+        if (!Writable(addr, 4)) { AgentState.Log($"WriteU32 to unwritable 0x{addr:X} dropped"); return; }
+        *(uint*)addr = v;
+    }
+
+    // TestMap 模式下的假分配：假地址 → 内容副本（测试断言 trampoline 写出的字节用）。
+    internal static readonly Dictionary<ulong, byte[]> TestAllocs = new();
+    static ulong nextTestAlloc = 0x7F00_0000_0000;
+
+    /// <summary>分配 RW 内存写入新 buffer（旧 buffer 永不释放——S3 旧帧安全）。0 = 失败。</summary>
+    public static ulong AllocRW(byte[] data)
+    {
+        if (TestMap != null)
+        {
+            ulong fake = nextTestAlloc;
+            nextTestAlloc += 0x1000;
+            TestAllocs[fake] = data.ToArray();
+            return fake;
+        }
+        ulong p = VirtualAlloc(0, (nuint)data.Length, 0x3000 /*MEM_COMMIT|MEM_RESERVE*/, 0x04 /*PAGE_READWRITE*/);
+        if (p == 0) { AgentState.Log("VirtualAlloc failed"); return 0; }
+        Marshal.Copy(data, 0, (nint)p, data.Length);
+        return p;
     }
 }

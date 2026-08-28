@@ -74,13 +74,15 @@ public static class AgentState
         try { log?.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {msg}"); } catch { /* 日志永不致命 */ }
     }
 
-    /// <summary>测试复位（自检/校准积累的状态）。</summary>
+    /// <summary>测试复位（自检/校准/trampoline 积累的状态）。</summary>
     public static void ResetForTest()
     {
         lock (statusLock) status = "ok";
         StubPresent = false;
         VarMap = null;
         Blanks.Reset();
+        VarCalibrator.ResetForTest();
+        Trampoline.ResetForTest();
     }
 
     public sealed class BlanksState

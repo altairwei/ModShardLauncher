@@ -23,4 +23,8 @@
     <ProjectReference Include="..\MslLive.Shared\MslLive.Shared.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Assets\*.bin;Assets\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

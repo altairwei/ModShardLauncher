@@ -162,6 +162,7 @@ public static class RefsExtractor
             },
             Jump = inst.Kind is UndertaleInstruction.Opcode.B or UndertaleInstruction.Opcode.Bt
                     or UndertaleInstruction.Opcode.Bf or UndertaleInstruction.Opcode.PopEnv
+                    or UndertaleInstruction.Opcode.PushEnv   // pushenv 同样携带 24 位偏移（S2 黄金 buffer 实测 A00000BA）
                 ? inst.JumpOffset : null,
             Cmp = inst.Kind == UndertaleInstruction.Opcode.Cmp ? (byte)inst.ComparisonKind : null,
         };
@@ -179,6 +180,14 @@ public static class RefsExtractor
         }
         if (inst.Destination?.Target != null) sem.Var = inst.Destination.Target.Name?.Content;
         if (inst.Function?.Target != null) sem.Fn = inst.Function.Target.Name?.Content;
+        // 变量引用指令：文件操作数顶字节随载荷走——VM 加载只重写 low24，顶字节
+        // （0xA0 Normal / 0x80 StackTop，vendored dll 的 Reference.Type）必须原样回填
+        // （findings-t11 新发现 4：静态占位 0x?000DEAD 的顶字节在文件侧已就位）。
+        if (sem.Var != null)
+        {
+            var r = inst.Value as UndertaleInstruction.Reference<UndertaleVariable> ?? inst.Destination;
+            if (r != null) sem.RefTop = (byte)r.Type;
+        }
         if (sem.Var != null) vars.Add(sem.Var);
         if (sem.Fn != null) fns.Add(sem.Fn);
         if (sem.Str != null) strs.Add(sem.Str);

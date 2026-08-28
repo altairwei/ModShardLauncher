@@ -5,7 +5,7 @@ namespace MslLive.Agent;
 
 /// <summary>\\.\pipe\msl-live-&lt;pid&gt; 单客户端服务。后台线程自持，永远不阻塞游戏线程。
 /// 首连跑自检（结果进 hello）；helloAck 拒收 → 关连接继续监听（MSL 可能换版本重来）。
-/// proof/batch 是 Task 14/15 的诚实挡板：明确回错，绝不假装成功。</summary>
+/// proof 走 ProofVerify + Trampoline（Task 14）；batch 仍是 Task 15 的诚实挡板：明确回错，绝不假装成功。</summary>
 public static class PipeServer
 {
     static bool started;
@@ -71,9 +71,20 @@ public static class PipeServer
                     AgentState.Log($"vars received: {AgentState.VarMap.Count} entries");
                     break;
                 case "proof":
-                    // Task 14 接管前的诚实挡板
-                    Wire.Send(s, "proofAck", new ProofAck { Ok = false, Error = "encoder not implemented" });
+                {
+                    var pm = Wire.Decode<ProofMsg>(data);
+                    var pAck = ProofVerify.Run(pm);
+                    // 编码自证过了才装 trampoline；装不上 = 自证不可信（编译器形态/注册表假设破裂），
+                    // 整个 proofAck 拒掉（fail-closed，MSL 侧拒绝开会话）
+                    if (pAck.Ok && !Trampoline.Install())
+                        pAck = new ProofAck
+                        {
+                            Ok = false, Verified = pAck.Verified, Failed = pAck.Failed,
+                            Error = "trampoline install failed: " + Trampoline.LastError,
+                        };
+                    Wire.Send(s, "proofAck", pAck);
                     break;
+                }
                 case "batch":
                     // Task 15 接管前的诚实挡板
                     var b = Wire.Decode<BatchMsg>(data);

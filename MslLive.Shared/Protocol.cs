@@ -9,6 +9,10 @@ public sealed class SemInstruction
     public byte T2 { get; set; }
     public short Inst { get; set; }
     public ushort Low16 { get; set; }
+    /// <summary>文件形态操作数的顶字节（= UTMT ReferenceType：Normal 0xA0 / Stacktop 0x80 …）。
+    /// 静态占位 0x?000DEAD 的顶字节在文件侧就已就位（findings-t11 新发现 4），VM 加载只重写 low24——
+    /// 编码器对变量引用操作数原样回填本字段，只翻译 low24。非变量引用指令恒为 0。</summary>
+    public byte RefTop { get; set; }
     public string? Var { get; set; }
     public string? Fn { get; set; }
     public string? Str { get; set; }
