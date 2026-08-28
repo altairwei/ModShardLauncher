@@ -19,6 +19,14 @@ public class LiveSessionTests : IDisposable
         return s;
     }
 
+    // mock agent 首发前必须等连接就位——否则 Write 抢在 client Connect 前抛 InvalidOperationException，
+    // agent 任务静默死亡、client 侧首收无超时永挂（全量回归实测挂起形态，Task 11 复盘）。
+    static void WaitConnected(NamedPipeServerStream s)
+    {
+        for (int i = 0; i < 2000 && !s.IsConnected; i++) Thread.Sleep(5);
+        if (!s.IsConnected) throw new InvalidOperationException("mock agent: client never connected");
+    }
+
     CompileRecord SeedBaseline()
     {
         var tmp = Path.Combine(Path.GetTempPath(), "msl_sess_" + Guid.NewGuid().ToString("N") + ".win");
@@ -40,6 +48,7 @@ public class LiveSessionTests : IDisposable
         using var server = NewServer(pipe);
         var agent = Task.Run(() =>
         {
+            WaitConnected(server);
             Wire.Send(server, "hello", new HelloMsg
                 { AgentVersion = "v1", Pid = 1, BootHash = rec.Hash, StubPresent = true, AgentStatus = "ok" });
             var ack = Wire.Receive(server);
@@ -82,6 +91,7 @@ public class LiveSessionTests : IDisposable
         using var server = NewServer(pipe);
         var agent = Task.Run(() =>
         {
+            WaitConnected(server);
             Wire.Send(server, "hello", new HelloMsg
                 { AgentVersion = "OLD", Pid = 1, BootHash = rec.Hash, StubPresent = true, AgentStatus = "ok" });
             var ack = Wire.Receive(server);
@@ -102,6 +112,7 @@ public class LiveSessionTests : IDisposable
         using var server = NewServer(pipe);
         var agent = Task.Run(() =>
         {
+            WaitConnected(server);
             Wire.Send(server, "hello", new HelloMsg
                 { AgentVersion = "v1", Pid = 1, BootHash = "DEADBEEF", StubPresent = true, AgentStatus = "ok" });
             var ack = Wire.Receive(server);
@@ -121,6 +132,7 @@ public class LiveSessionTests : IDisposable
         using var server = NewServer(pipe);
         var agent = Task.Run(() =>
         {
+            WaitConnected(server);
             Wire.Send(server, "hello", new HelloMsg
                 { AgentVersion = "v1", Pid = 1, BootHash = rec.Hash, StubPresent = true, AgentStatus = "ok" });
             Wire.Receive(server);   // helloAck

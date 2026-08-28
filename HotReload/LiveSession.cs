@@ -66,7 +66,8 @@ public sealed class LiveSession : IDisposable
         {
             pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.None);
             pipe.Connect(2000);
-            var (type, data) = Wire.Receive(pipe);
+            // 首收也要限时：agent 连上后死了/不发 hello 是真实病态（UI 线程永挂），fail-closed
+            var (type, data) = ReceiveWithTimeout(10000);
             if (type != "hello") return Fail($"protocol error: expected hello, got {type}");
             Hello = Wire.Decode<HelloMsg>(data);
 
