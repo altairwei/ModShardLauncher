@@ -373,3 +373,6 @@ FodyWeavers.xsd
 
 # MSL related
 Settings.json
+
+Externals/
+docs/superpowers/
