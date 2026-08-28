@@ -34,6 +34,7 @@
     <Compile Include="Mods/*.cs" />
     <Compile Include="Controls/*.cs" />
     <Compile Include="ModUtils/*.cs" />
+    <Compile Include="HotReload\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -159,6 +160,14 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Page Remove="Externals\**\*.xaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="MslLive.Shared\MslLive.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>

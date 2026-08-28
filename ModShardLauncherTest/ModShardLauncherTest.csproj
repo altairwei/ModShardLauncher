@@ -28,6 +28,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ModShardLauncher.csproj" />
+    <ProjectReference Include="..\MslLive.Shared\MslLive.Shared.csproj" />
+    <Reference Include="UndertaleModLib">
+      <HintPath>..\Reference\UndertaleModLib.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>
