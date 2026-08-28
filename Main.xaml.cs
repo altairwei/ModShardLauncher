@@ -220,6 +220,14 @@ namespace ModShardLauncher
         public string Language = "English";
         public bool EnableLogger = true;
         public List<string> EnableMods = new();
+        // Dev 模式（热加载）——SaveSettings 序列化全部 public 字段，零额外工作
+        public bool DevMode = false;
+        public int LiveScriptSlots = 64;
+        public int LiveShellObjects = 8;
+        public int LiveEmptyRooms = 4;
+        public int LiveBlankSprites = 64;
+        public int LiveBlankPaths = 16;
+        public string LiveShellParents = "o_button,o_button,o_menuParent,o_menuParent,,,,";
         public static void LoadSettings()
         {
             // if no settings file, early stop
