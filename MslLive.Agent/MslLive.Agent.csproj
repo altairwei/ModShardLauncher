@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <!-- AgentVersion 必须 == MSL 的 mslVersion（"v"+FileVersion），Task 15 的 Build-MslLive.ps1 负责同步盖章 -->
+    <FileVersion>0.13.2.0</FileVersion>
+    <AssemblyVersion>0.13.2.0</AssemblyVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\MslLive.Shared\MslLive.Shared.csproj" />
+  </ItemGroup>
+</Project>

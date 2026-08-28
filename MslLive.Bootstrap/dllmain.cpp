@@ -53,12 +53,16 @@ void DetourInitGML()
 }
 
 // ---- BootArgs：与 MslLive.Agent 的 BootArgs struct 逐字段对应（LayoutKind.Sequential）----
+// Task 13 扩尾：RegBasePtrVa/RegCountVa = 注册表记账全局 VA（Task 11 Step 5 实测；
+// agent 注册表走表由它们驱动，不再用 S2 双点 AOB）。
 struct BootArgs
 {
     const wchar_t* gameDir;
     uint64_t functionAdd;
     uint64_t nodeSigFn;
     uint64_t execVtable;
+    uint64_t regBasePtrVa;
+    uint64_t regCountVa;
     int32_t regAnchorIdx1;
     int32_t regAnchorIdx2;
 };
@@ -158,7 +162,8 @@ DWORD WINAPI BootstrapThread(LPVOID)
     g_onInitGML = (OnInitGmlFn)onInitPtr;
 
     BootArgs args{ gameDir.c_str(), msladdr::kFunctionAdd, msladdr::kNodeSigFn,
-                   msladdr::kExecVtable, msladdr::kRegAnchorIdx1, msladdr::kRegAnchorIdx2 };
+                   msladdr::kExecVtable, msladdr::kFuncRegistryBasePtr, msladdr::kFuncRegistryCount,
+                   msladdr::kRegAnchorIdx1, msladdr::kRegAnchorIdx2 };
     rc = ((BootFn)bootPtr)(&args);
     if (rc != 0) { Log("[bootstrap] managed Boot returned %d\n", rc); return 0; }
     g_managedReady = true;
