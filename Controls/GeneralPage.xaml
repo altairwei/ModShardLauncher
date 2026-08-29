@@ -361,7 +361,7 @@
             </CheckBox.Style>
         </CheckBox>
         <TextBlock Text="{DynamicResource DevQuotasHint}" VerticalAlignment="Top" Margin="32,176,0,0"
-                   Style="{StaticResource xFont}" FontSize="9" Foreground="#95796A"
+                   FontFamily="{StaticResource ssFont}" FontSize="9" Foreground="#95796A"
                    Width="540" TextWrapping="Wrap"/>
         <TextBox x:Name="LiveScriptSlotsBox" VerticalAlignment="Top" HorizontalAlignment="Left"
                  Margin="32,204,0,0" Width="48" Background="#11101A" Foreground="#95796A"
