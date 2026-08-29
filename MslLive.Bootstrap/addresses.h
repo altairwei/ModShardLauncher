@@ -16,12 +16,24 @@ inline constexpr uint64_t kNodeSigFn  = 0x1406BE508;
 inline constexpr uint64_t kExecVtable = 0x14066AC48;   // S2/S3：执行记录 vtable
 
 // InitGMLFunctions：内置函数注册编排器（Task 11 Step 2 实测）。
-// 实际结构 = 顺序调 5 个注册器（0x14025A4F0×458 / 0x1401F2440×128 / 0x140248C50×70 /
-// 0x140035A20×40 / 0x14020F7B0×27 站点），间插 call [rax+10h] 日志调用，全长 0x228。
-// 注册器自增长函数表（分配器 0x1404CBCD0，每次容量 +=500）——
-// 我方注册必须挂在 orig 返回之后（postfix），绝不能先挂。
-// 定位法 = 内置名 LEA 聚类 → 两直方图目标 → 父收敛（findings-t11.md）。
+// Task 16 真机复盘修正：0x1402CDDAF 是编排器 F（0x1402CDC60..0x1402CDFD7，
+// prologue push r14; sub rsp,0C30h）的函数中部 merge 标签（je@0x1402CDCC3 /
+// jne@0x1402CDCCF / 直落三路汇入），不是函数入口——不可 hook（入口 rsp≡0
+// mod 16 → CRT #GP；detour 栈消耗平移 F 的 rsp 相对访问并错位 epilogue）。
+// 保留作 build fingerprint 锚。
 inline constexpr uint64_t kInitGMLFunctions = 0x1402CDDAF;   // ← Task 11 Step 2 实测
+
+// F 内最后一个注册器（Task 16 fix-loop #3 实测选定的新 hook 点）。
+// 0x1403148A0 = 注册表自增长/追加函数本体：读 count(0x140A34254)/capacity
+// (0x140A474F0)/base(0x140A34468) 三全局，容量不足则 +500 走 realloc
+// (0x1404CBCD0)，记录步进 0x50 追加。正规 ABI 函数：prologue sub rsp,38h、
+// epilogue add rsp,38h; ret（@0x1403155FD），全 .text 唯一 E8 调用者 =
+// F 内 call @0x1402CDFB4。E8 调用保证入口 rsp≡8 mod 16，无需对齐垫片；
+// F 在 call 返回后不读 rax（rcx/rdx/rax 全部重载，r14 由 epilogue pop 恢复）
+// → detour 可自由使用易失寄存器。orig 返回 = 注册表已完整、仍在 F 内游戏线程上。
+inline constexpr uint64_t kLastRegistrar          = 0x1403148A0;  // ← hook 目标
+inline constexpr uint64_t kLastRegistrarCallSite  = 0x1402CDFB4;  // 唯一 E8 调用指令
+inline constexpr uint64_t kAfterLastRegistrarCall = 0x1402CDFB9;  // 该 call 的返回地址（RA 门控值）
 
 // Function_Add：注册器体内 723 站点收敛的 call 目标（5 注册器共用）。
 // 参数序（Step 3 实测，3 个站点一致）：rcx=name(.rdata), rdx=funcptr(.text), r8d=argc
@@ -66,10 +78,15 @@ inline constexpr PrimCheck kChecks[] = {
     { kMmAlloc,            { 0x48,0x8B,0xC1,0x4C,0x8D,0x15,0xF6,0x92,0xAF,0xFF,0x49,0x83,0xF8,0x0F,0x0F,0x87 } },
     { kMmFree,             { 0x48,0x85,0xC9,0x0F,0x84,0x00,0x01,0x00,0x00,0x48,0x89,0x5C,0x24,0x08,0x57,0x48 } },
     { kNodeSigFn,          { 0x70,0x7A,0x27,0x40,0x01,0x00,0x00,0x00,0x3C,0x75,0x6E,0x6B,0x6E,0x6F,0x77,0x6E } }, // 数据身份，见上注释
-    { kInitGMLFunctions,   { 0x48,0x8B,0x0D,0x3A,0x80,0x49,0x00,0x48,0x8D,0x15,0x97,0x78,0x3F,0x00,0x44,0x88 } },
+    { kInitGMLFunctions,   { 0x48,0x8B,0x0D,0x3A,0x80,0x49,0x00,0x48,0x8D,0x15,0x97,0x78,0x3F,0x00,0x44,0x88 } }, // fingerprint（merge 标签，非 hook 点，见上）
+    { kLastRegistrar,      { 0x48,0x83,0xEC,0x38,0x8B,0x05,0xAA,0xF9,0x71,0x00,0x8B,0x15,0x40,0x2C,0x73,0x00 } },
+    // call 站点校验：E8 rel32=0x000468E7（0x1402CDFB9+0x468E7=0x1403148A0）+ 其后
+    // F 收尾指令（mov rcx,[rip] / lea rdx,[rip]）——三者同时锁死调用点与目标。
+    { kLastRegistrarCallSite, { 0xE8,0xE7,0x68,0x04,0x00,0x48,0x8B,0x0D,0x30,0x7E,0x49,0x00,0x48,0x8D,0x15,0x85 } },
     { kFunctionAdd,        { 0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x6C,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57 } },
     // kExecVtable 在 .rdata/.data（vtable 是指针表不是代码），不校验字节——
     // 它的存在性由 agent 侧 NodeIndex 扫描有效性间接背书。
 };
-static_assert(kInitGMLFunctions != 0 && kFunctionAdd != 0, "addresses.h not measured yet");
+static_assert(kInitGMLFunctions != 0 && kFunctionAdd != 0 && kLastRegistrar != 0,
+              "addresses.h not measured yet");
 }
