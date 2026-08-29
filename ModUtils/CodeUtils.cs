@@ -200,9 +200,14 @@ namespace ModShardLauncher
             {
                 Log.Information(string.Format("Trying to add the function : {0}", name.ToString()));
 
+                // 注意：禁止在此挪动 Code 列表既有序目。GMS2.3 的 child 条目（gml_Script_*
+                // wrapper）不序列化 ParentEntry，读侧按“字节码地址与父共享”推断归属；
+                // 写入器给 child 编址用的是全局游标（最近写完 blob 的 root），因此 child
+                // 必须紧跟其父。旧版每次调用把列表头部条目轮转到尾部，将 vanilla 的
+                // [gml_GlobalScript_X, gml_Script_X] 父子对拆散并与新增条目交错——保存后
+                // wrapper 被劫持为新增条目的子体（真机 "Data structure with index does not
+                // exist" 根因，见 LiveStubInjectorTests.Inject_RoundTrip_...）。
                 UndertaleCode scriptCode = AddCode(codeAsString, name);
-                ModLoader.Data.Code.Add(ModLoader.Data.Code[0]);
-                ModLoader.Data.Code.RemoveAt(0);
 
                 Log.Information(string.Format("Successfully added the function : {0}", name.ToString()));
                 return scriptCode;

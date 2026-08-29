@@ -130,4 +130,51 @@ public class LiveStubInjectorTests : IDisposable
         Assert.Contains(data.Scripts, s => s.Name.Content == LiveStubInjector.ApplyFn && s.Code == code);
         Assert.Contains(data.GlobalInitScripts, g => g.Code == code);
     }
+
+    /// <summary>回归（Task 16 fix-loop #4，真机 Code Error 根因）：GMS2.3 的 child 条目
+    /// （gml_Script_* wrapper）不序列化 ParentEntry，靠“地址与父共享”在读侧推断；写入器
+    /// （UTMT 0.6.1.0）给 child 编址用的是全局游标 LastBytecodeAddress = 最近写入 blob 的
+    /// root——因此 child 在 Code 列表里必须紧跟其父。AddFunction 旧版每次调用把列表头部
+    /// 条目轮转到尾部，将 vanilla 的 [gml_GlobalScript_X, gml_Script_X] 父子对拆散并与
+    /// 新增槽位交错：保存后 37 个 wrapper 被劫持为 msl_slot_* 的子体（字节码=12 字节
+    /// "return 0;" 桩），scr_presets_init(gml_Script_scr_preset_encounter) 返回 undefined
+    /// → "Data structure with index does not exist"。注入 → 保存 → 重载，
+    /// vanilla 条目的 (Length, ParentEntry) 必须逐一原样保留。</summary>
+    [Fact]
+    public void Inject_RoundTrip_PreservesVanillaChildEntryOwnership()
+    {
+        var data = Load();
+        var baseline = data.Code.ToDictionary(
+            c => c.Name.Content,
+            c => (len: c.Length, parent: c.ParentEntry?.Name.Content));
+        UndertaleData reloaded;
+
+        LiveStubInjector.Inject(data, new LiveQuotas());
+
+        // 往返走磁盘文件（MemoryStream 会让 vendored UndertaleIO.Read 抛 NRE，且真机
+        // 场景本身就是文件读写——以文件为准）
+        string tmp = Path.Combine(Path.GetTempPath(), "msl-roundtrip-" + Guid.NewGuid().ToString("N") + ".win");
+        try
+        {
+            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
+                UndertaleIO.Write(fs, data);
+            using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read))
+                reloaded = UndertaleIO.Read(fs, _ => { });
+        }
+        finally
+        {
+            if (File.Exists(tmp)) File.Delete(tmp);
+        }
+
+        var stolen = reloaded.Code
+            .Where(c => baseline.TryGetValue(c.Name.Content, out var b)
+                        && (b.len != c.Length || b.parent != c.ParentEntry?.Name.Content))
+            .ToList();
+        Assert.True(stolen.Count == 0,
+            string.Join("; ", stolen.Take(5).Select(c =>
+                $"{c.Name.Content}: len {baseline[c.Name.Content].len}->{c.Length}, " +
+                $"parent '{baseline[c.Name.Content].parent}'->'{c.ParentEntry?.Name.Content}'")));
+        Assert.All(reloaded.Code.Where(c => c.Name.Content.StartsWith("msl_")),
+            c => Assert.Empty(c.ChildEntries));
+    }
 }
