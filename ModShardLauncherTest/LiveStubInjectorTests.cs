@@ -35,6 +35,16 @@ public class LiveStubInjectorTests : IDisposable
         foreach (var n in new[] { "msl_live_apply", "msl_live_report", "msl_loader_0" })
             Assert.Contains(data.Code, c => c.Name.Content == n);
 
+        // SCPT + GlobalInit 注册（Task 16 真机缺漏修复）：无 SCPT 条目 = VM load 时
+        // "Unable to find function"。全部 stub（apply/report/loader/64 slots）都必须注册。
+        foreach (var n in new[] { "msl_live_apply", "msl_live_report", "msl_loader_0" }
+                 .Concat(Enumerable.Range(0, q.ScriptSlots).Select(i => $"msl_slot_{i}")))
+        {
+            var code = data.Code.First(c => c.Name.Content == n);
+            Assert.Contains(data.Scripts, s => s.Name.Content == n && s.Code == code);
+            Assert.Contains(data.GlobalInitScripts, g => g.Code == code);
+        }
+
         var manager = data.GameObjects.First(o => o.Name.Content == "o_msl_live");
         Assert.True(manager.Persistent);
         Assert.Contains(manager.Events[(int)EventType.Step], e => e.EventSubtype == 0);
@@ -98,9 +108,26 @@ public class LiveStubInjectorTests : IDisposable
         var q = new LiveQuotas();
         LiveStubInjector.Inject(data, q);
         int codeCount = data.Code.Count, objCount = data.GameObjects.Count, roomCount = data.Rooms.Count;
+        int scptCount = data.Scripts.Count, initCount = data.GlobalInitScripts.Count;
         LiveStubInjector.Inject(data, q);
         Assert.Equal(codeCount, data.Code.Count);
         Assert.Equal(objCount, data.GameObjects.Count);
         Assert.Equal(roomCount, data.Rooms.Count);
+        Assert.Equal(scptCount, data.Scripts.Count);
+        Assert.Equal(initCount, data.GlobalInitScripts.Count);
+    }
+
+    /// <summary>自愈路径：在「有 stub 但无 SCPT/GlobalInit 注册」的历史产物上重跑 Inject，
+    /// 注册必须补齐且 code 不重复（Task 16 之前编译的 data.win 重编场景）。</summary>
+    [Fact]
+    public void Inject_HealsLegacyStubWithoutRegistration()
+    {
+        var data = Load();
+        Msl.AddFunction("return 0;", LiveStubInjector.ApplyFn);   // 模拟旧产物：只有 code entry
+        LiveStubInjector.Inject(data, new LiveQuotas());
+        Assert.Single(data.Code.Where(c => c.Name.Content == LiveStubInjector.ApplyFn));   // 不重复
+        var code = data.Code.First(c => c.Name.Content == LiveStubInjector.ApplyFn);
+        Assert.Contains(data.Scripts, s => s.Name.Content == LiveStubInjector.ApplyFn && s.Code == code);
+        Assert.Contains(data.GlobalInitScripts, g => g.Code == code);
     }
 }

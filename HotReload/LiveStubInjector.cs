@@ -71,8 +71,17 @@ public static class LiveStubInjector
 
     static void EnsureFunction(UndertaleData data, string name)
     {
-        if (data.Code.All(x => x.Name.Content != name))
-            Msl.AddFunction("return 0;", name);
+        var code = data.Code.FirstOrDefault(x => x.Name.Content == name);
+        if (code == null)
+            code = Msl.AddFunction("return 0;", name);
+        // SCPT + GlobalInit 注册（Task 16 真机抓到的缺漏）：VM 在 load 时按名解析 call.i 的
+        // 函数表只来自 SCPT 块——光有 CODE+FUNC 条目，游戏启动即报 "Unable to find function <name>"。
+        // 裸名合法：vanilla 有 3276 条裸名 SCPT 先例（scr_blank 等指向 gml_GlobalScript_*）。
+        // 两半各自幂等：在已打过（无注册）的 data.win 上重编可自愈。
+        if (data.Scripts.All(s => s.Name.Content != name))
+            data.Scripts.Add(new UndertaleScript { Name = code.Name, Code = code });
+        if (data.GlobalInitScripts.All(g => g.Code != code))
+            data.GlobalInitScripts.Add(new UndertaleGlobalInit { Code = code });
     }
 
     static void EnsureString(UndertaleData data, string content)
