@@ -91,8 +91,6 @@ public sealed class LiveSession : IDisposable
             Wire.Send(pipe, "helloAck", new HelloAck { Accept = reject == null, Reason = reject ?? "" });
             if (reject != null) return Fail(reject);
 
-            if (Alloc == null && !AcquireBlanks()) return Fail(LastError);
-
             var boot = BaselineStore.BootBaseline!;
             Wire.Send(pipe, "vars", new VarsMsg
             {
@@ -105,6 +103,13 @@ public sealed class LiveSession : IDisposable
             var proof = Wire.Decode<ProofAck>(pd);
             if (!proof.Ok)
                 return Fail($"编码自证失败（{proof.Verified} 通过 / {proof.Failed} 失败）：{proof.Error}");
+
+            // fix-loop #12：blanks 必须在 proofAck 之后获取。agent 的上报是两跳设计（Task 14）：
+            // stub GML 的 msl_live_report 调用先命中编译期注入的 dummy 脚本，proof 阶段
+            // Trampoline.Install 才把它换成 call.v 原生——校准只可能发生在安装后的下一游戏帧。
+            // 旧顺序把 AcquireBlanks 排在 proof 前，queryBlanks 恒 -1（5×500ms 全空）→
+            // 结构性死锁：热会话永远建立不了（真机 23:03 首连实测，agent 零 report calibrated）。
+            if (Alloc == null && !AcquireBlanks()) return Fail(LastError);
 
             State = LiveSessionState.Active;
             Current = this;
@@ -134,7 +139,7 @@ public sealed class LiveSession : IDisposable
                 Alloc.SetBlanks(blanks);
                 return true;
             }
-            Thread.Sleep(500);   // 游戏还在启动早期，stub 尚未完成 blank 分配
+            Thread.Sleep(500);   // trampoline 刚装上、游戏线程下一帧还没跑（Step 的 report 未校准）——等一帧再问
         }
         LastError = "blank 分配失败（_blank.png 缺失或游戏未过启动阶段）——重装 Dev 组件或稍后再试";
         return false;

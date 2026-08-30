@@ -54,15 +54,16 @@ public class LiveSessionTests : IDisposable
             var ack = Wire.Receive(server);
             Assert.Equal("helloAck", ack.Type);
             Assert.True(Wire.Decode<HelloAck>(ack.Data).Accept);
-            var q = Wire.Receive(server);
-            Assert.Equal("queryBlanks", q.Type);
-            Wire.Send(server, "blanks", new BlanksMsg { SpriteFirst = 100, PathFirst = 8 });   // Count=0：agent 不知配额，MSL 侧用 quotas 覆盖
             var v = Wire.Receive(server);
             Assert.Equal("vars", v.Type);
             var p = Wire.Receive(server);
             Assert.Equal("proof", p.Type);
             Assert.NotEmpty(Wire.Decode<ProofMsg>(p.Data).Ops);
             Wire.Send(server, "proofAck", new ProofAck { Ok = true, Verified = 64 });
+            // fix-loop #12：blanks 在 proofAck 之后获取（两跳设计——trampoline 装上才有回报）
+            var q = Wire.Receive(server);
+            Assert.Equal("queryBlanks", q.Type);
+            Wire.Send(server, "blanks", new BlanksMsg { SpriteFirst = 100, PathFirst = 8 });   // Count=0：agent 不知配额，MSL 侧用 quotas 覆盖
             var b = Wire.Receive(server);
             var batch = Wire.Decode<BatchMsg>(b.Data);
             Wire.Send(server, "receipt", new BatchReceipt
@@ -136,15 +137,69 @@ public class LiveSessionTests : IDisposable
             Wire.Send(server, "hello", new HelloMsg
                 { AgentVersion = "v1", Pid = 1, BootHash = rec.Hash, StubPresent = true, AgentStatus = "ok" });
             Wire.Receive(server);   // helloAck
-            Wire.Receive(server);   // queryBlanks
-            Wire.Send(server, "blanks", new BlanksMsg { SpriteFirst = 100, PathFirst = 8 });
             Wire.Receive(server);   // vars
-            Wire.Receive(server);   // proof
+            Wire.Receive(server);   // proof（失败后不再获取 blanks——fix-loop #12 顺序）
             Wire.Send(server, "proofAck", new ProofAck { Ok = false, Error = "byte mismatch @entry_x", Verified = 61, Failed = 3 });
         });
         var s = NewSession(pipe);
         Assert.False(s.TryConnect());
         Assert.Contains("编码自证失败", s.LastError);
+        agent.Wait();
+    }
+
+    // fix-loop #12 回归（真机 23:03 首连实测）：agent 的上报是两跳设计——stub GML 的
+    // msl_live_report 调用先命中编译期注入的 dummy 脚本，proof 阶段 Trampoline.Install
+    // 才把 dummy 换成 call.v 原生，校准只可能发生在安装后的下一游戏帧。因此 queryBlanks
+    // 在 proof 之前只能拿到 -1：若 MSL 把 AcquireBlanks 排在 proof 前（旧顺序），
+    // 5×500ms 重试全空 → 死锁——blanks 永远无法校准，热会话永远建立不了。
+    // 本用例的 mock 如实建模：proof 之前回 -1；proof 之后第一问仍 -1（trampoline
+    // 刚装、下一帧未跑），第二问才回真实值——顺带钉住 500ms 重试语义。
+    [Fact]
+    public void Handshake_BlanksUncalibratedUntilProof_StillSucceeds()
+    {
+        var rec = SeedBaseline();
+        string pipe = "msl-test-" + Guid.NewGuid().ToString("N");
+        using var server = NewServer(pipe);
+        var agent = Task.Run(() =>
+        {
+            try
+            {
+                WaitConnected(server);
+                Wire.Send(server, "hello", new HelloMsg
+                    { AgentVersion = "v1", Pid = 1, BootHash = rec.Hash, StubPresent = true, AgentStatus = "ok" });
+                bool proofSeen = false;
+                int queriesAfterProof = 0;
+                while (true)
+                {
+                    var m = Wire.Receive(server);
+                    switch (m.Type)
+                    {
+                        case "helloAck":
+                        case "vars":
+                            break;
+                        case "proof":
+                            proofSeen = true;
+                            Wire.Send(server, "proofAck", new ProofAck { Ok = true, Verified = 64 });
+                            break;
+                        case "queryBlanks":
+                            if (!proofSeen || ++queriesAfterProof == 1)
+                                Wire.Send(server, "blanks", new BlanksMsg());   // 未校准 = 全 -1
+                            else
+                                Wire.Send(server, "blanks", new BlanksMsg { SpriteFirst = 100, PathFirst = 8 });
+                            break;
+                        default:
+                            return;   // 本用例不推 batch；会话结束（pipe 关闭）也走异常退出
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+        });
+        var s = NewSession(pipe);
+        Assert.True(s.TryConnect(), "旧顺序死锁形态：" + s.LastError);
+        Assert.Equal(LiveSessionState.Active, s.State);
+        Assert.NotNull(s.Alloc);
+        s.End();
         agent.Wait();
     }
 
