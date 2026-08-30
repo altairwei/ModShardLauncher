@@ -40,7 +40,14 @@ public static unsafe class Boot
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvStdcall) })]
     public static void OnInitGML()
     {
-        try { NativeRegistration.RegisterAll(); }
+        try
+        {
+            NativeRegistration.RegisterAll();
+            // fix-loop #9：boot 期后台建索引——游戏刚建完 exec 节点（扫描得见全量）、
+            // data.win 页多驻留（构建在秒级）；此前在首连 SelfCheck 里同步跑，真机实测
+            // 26min43s（游戏工作集被扫描逐出 → 38K 命中散读全是页错误），hello 迟到超时。
+            NodeIndex.BeginBuild();
+        }
         catch (Exception ex) { AgentState.Log("RegisterAll failed: " + ex); }
     }
 }

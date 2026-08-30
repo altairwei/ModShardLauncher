@@ -8,14 +8,17 @@ using MslLive.Shared;
 namespace MslLive.Agent;
 
 /// <summary>\\.\pipe\msl-live-&lt;pid&gt; 单客户端服务。后台线程自持，永远不阻塞游戏线程。
-/// 首连跑自检（结果进 hello）；helloAck 拒收 → 关连接继续监听（MSL 可能换版本重来）。
+/// 首连自检只剩 registry 走表（快，0.4s 量级）；节点索引在 boot 期后台构建（fix-loop #9，
+/// NodeIndex.BeginBuild）——hello 每连接快照索引现状（有界兜等，绝不缓存早半拍状态）。
+/// helloAck 拒收 → 关连接继续监听（MSL 可能换版本重来）。
 /// proof 走 ProofVerify + Trampoline（Task 14）；batch 走 ApplyEngine 两阶段（Task 15）：
 /// Phase 1 失败立即回执；成功则等游戏线程 Pump 完置出站信箱，本循环在收件空闲间隙轮询转发
 /// （游戏线程写 pipe 可能阻塞 VM——MSL 30s 超时兜底，游戏暂停 = 诚实超时）。
-/// 管道全程零 overlapped/IOCP 依赖（fix-loop #7/#8）：
-/// accept 用非 overlapped 句柄上的 ConnectNamedPipe(h,NULL)——.NET WaitForConnection 的
-/// overlapped 完成投递在游戏宿主内实测会丢（内核配对后 Handle 24.5 分钟未执行，
-/// 真机 15:01/15:37 两现，诊断扰动才醒——见 smoke 结果文档循环 #7）；
+/// 管道全程零 overlapped/IOCP 依赖（fix-loop #7/#8 加固保留；#7 当时「overlapped 完成投递
+/// 丢失」的解读已被 #9 推翻——真机 15:01 的 24.5 分钟延迟实为 SelfCheck 里 NodeIndex.Build
+/// 的页错误风暴（38K 命中散读 × 游戏 3.3GB 工作集），线程并非没醒、而是在磨。零 IOCP
+/// accept 仍少一层宿主变量，保留）：
+/// accept 用非 overlapped 句柄上的 ConnectNamedPipe(h,NULL)；
 /// 数据面单线程 peek-poll（PeekNamedPipe 查余量 + 有字节才 ReadFile）——同步句柄上并发
 /// 读写会互相锁死（内核对同步句柄的 I/O 串行化，专用读线程方案已被最小复现证伪）；
 /// CreateNamedPipeW 显式 64K 配额——零配额管道在「对端暂无挂起读者」时写会阻塞，
@@ -101,6 +104,13 @@ public static class PipeServer
     {
         if (!selfChecked) { SelfCheck(); selfChecked = true; }
 
+        // fix-loop #9：索引构建已移 boot 期后台（NodeIndex.BeginBuild）。此处有界兜等
+        // 「boot 后不久就编译」的窗口（8s ≪ MSL 侧 10s hello 超时；未启动/已完成立即过，
+        // 等不到就如实报、MSL 拒开后干净降级纯写盘）。stub 与索引状态每连接现查快照——
+        // 进程级一次性缓存会把构建期的 false 钉死到游戏重启（热会话永久失效）。
+        NodeIndex.WaitReady(8000);
+        AgentState.StubPresent = NodeIndex.TryGet("gml_Object_o_msl_live_Step_0", out _);
+
         // 单线程数据面：本线程独占句柄的全部读写（同步句柄并发 I/O 互相锁死，fix-loop #8）。
         // 入站 = PeekNamedPipe 查余量、有字节才 ReadFile（立即返回），帧增量拼装、残段跨轮保留
         // （MSL 握手后背靠背连发 vars+proof）；出站 = Wire.Send（单写者）+ 空闲间隙转发回执。
@@ -112,7 +122,7 @@ public static class PipeServer
             Pid = Environment.ProcessId,
             BootHash = AgentState.BootHash,
             StubPresent = AgentState.StubPresent,
-            AgentStatus = AgentState.Status,
+            AgentStatus = HelloStatus(),
         });
 
         // 握手有界等待：无限等会把后续连接全堵死在一条死连接上
@@ -190,11 +200,22 @@ public static class PipeServer
 
     static void SelfCheck()
     {
-        int nodes = NodeIndex.Build();
-        if (nodes < 30000) AgentState.Fail($"node index too small ({nodes})");
+        // fix-loop #9 起：节点索引构建移 boot 期后台线程（NodeIndex.BeginBuild），首连自检
+        // 只剩 registry 走表。规模护栏（<30000 → Fail）在构建线程上报（唯一知道总数的时刻）；
+        // stub 与索引状态在 Handle 每连接快照。
         if (!Registry.Bootstrap()) AgentState.Fail("registry bootstrap failed");
-        AgentState.StubPresent = NodeIndex.TryGet("gml_Object_o_msl_live_Step_0", out _);
-        AgentState.Log($"self-check: nodes={nodes} registry={Registry.Count} stub={AgentState.StubPresent} status={AgentState.Status}");
+        AgentState.Log($"self-check: nodes={NodeIndex.Count} registry={Registry.Count} status={AgentState.Status}");
+    }
+
+    /// <summary>hello 的状态串 = 累积态 + 瞬态后缀。瞬态（索引构建中/未启动）只作本连接后缀、
+    /// 不进 Fail 累积（Fail 是进程级永久的，瞬态会污染后续所有连接）——下一连接重查；
+    /// MSL 侧 Validate 见 status≠ok 即拒，干净降级纯写盘，稍后重试即恢复。</summary>
+    static string HelloStatus()
+    {
+        string status = AgentState.Status;
+        if (NodeIndex.Ready) return status;
+        string why = NodeIndex.Started ? "node index building" : "node index not built";
+        return status == "ok" ? why : status + "; " + why;
     }
 
     /// <summary>非阻塞增量帧读取器（fix-loop #8：替代专用读线程）。
