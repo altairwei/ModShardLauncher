@@ -89,4 +89,43 @@ public class PipeProtocolTests : IDisposable
         // 服务端记日志后关连接：下一次读必须 EOF（而不是挂死）
         Assert.ThrowsAny<Exception>(() => Wire.Receive(c));
     }
+
+    [Fact]
+    public void Accept_PendingWhenClientConnects_LateConnectionServed()
+    {
+        // fix-loop #7 现场时序：客户端在服务端 accept 已经挂起之后才连（真机上这一步的
+        // overlapped 完成投递丢失 → 28 分钟不取件）。测试宿主 IOCP 正常，这里钉的是
+        // 行为契约：accept 挂起中收到连接必须随即完成并送出 hello。
+        Thread.Sleep(300);   // 让监听线程先挂起在 accept 上
+        using var c = Connect();
+        var (t0, _) = Wire.Receive(c);
+        Assert.Equal("hello", t0);
+    }
+
+    [Fact]
+    public void IdleConnection_StaysResponsive_AcrossFlushCycles()
+    {
+        // 空闲要跨多个 200ms 轮询周期（出站回执转发节奏）：连接必须保持活着且继续可服务
+        using var c = Connect();
+        var (t0, _) = Wire.Receive(c);
+        Assert.Equal("hello", t0);
+        Wire.Send(c, "helloAck", new HelloAck { Accept = true });
+        Thread.Sleep(600);
+        Wire.Send(c, "queryBlanks", new { });
+        var (t1, d1) = Wire.Receive(c);
+        Assert.Equal("blanks", t1);
+        Assert.Equal(-1, Wire.Decode<BlanksMsg>(d1).SpriteFirst);
+    }
+
+    [Fact]
+    public void SequentialConnections_EachServedIndependently()
+    {
+        // accept 循环必须能连续服务多轮连接（每轮：连上 → hello → 不握手直接断开）
+        for (int i = 0; i < 3; i++)
+        {
+            using var c = Connect();
+            var (t0, _) = Wire.Receive(c);
+            Assert.Equal("hello", t0);
+        }
+    }
 }
