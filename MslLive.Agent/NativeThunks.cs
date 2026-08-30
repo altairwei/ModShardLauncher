@@ -36,6 +36,9 @@ public static class NativeRegistration
         delegate* unmanaged<void*, void*, void*, int, void*, void> reportFn = &NativeThunks.Report;
         add((byte*)Marshal.StringToHGlobalAnsi("msl_live_apply"), (void*)applyFn, 0);
         add((byte*)Marshal.StringToHGlobalAnsi("msl_live_report"), (void*)reportFn, 1);
+        // 自家 thunk 在模块外——Rescan 前报备，否则 fn 区间校验拒记录（fix-loop #6）
+        Registry.OwnFn((ulong)applyFn);
+        Registry.OwnFn((ulong)reportFn);
         Registry.Rescan();
         ApplyIndex = Registry.IndexOf("msl_live_apply");
         ReportIndex = Registry.IndexOf("msl_live_report");

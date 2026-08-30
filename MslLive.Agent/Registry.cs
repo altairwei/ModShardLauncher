@@ -10,7 +10,16 @@ namespace MslLive.Agent;
 public static class Registry
 {
     static readonly Dictionary<string, int> index = new();
+    // 自家 thunk（NativeRegistration 经 Function_Add 写进表的 UCO 地址，天然在游戏模块外）。
+    // 记录校验用 fn 区间抓"表读错位"的垃圾——但 Rescan 时表里混着自家记录，须先经 OwnFn
+    // 报备放行，否则 apply/report 索引永远 -1（Task 16 fix-loop #6，真机 2535 号记录实证）。
+    static readonly HashSet<ulong> ownedFns = new();
     public static int Count => index.Count;
+
+    /// <summary>报备自家函数地址（RegisterAll 在 Rescan 前调用，每进程一次）。</summary>
+    public static void OwnFn(ulong fn) => ownedFns.Add(fn);
+
+    internal static void ResetForTest() { index.Clear(); ownedFns.Clear(); }
 
     public static bool Bootstrap()
     {
@@ -26,7 +35,9 @@ public static class Registry
             string name = Mem.ReadCString(rec, 0x40);
             ulong fn = Mem.ReadU64(rec + 0x40);
             uint tail = Mem.ReadU32(rec + 0x4C);
-            if (name.Length == 0 || fn < 0x140000000 || fn >= 0x142000000 || tail != 0xFFFFFFFF)
+            // fn 区间校验抓"表读错位"的垃圾；自家 UCO thunk（模块外）经 OwnFn 报备放行
+            bool inModule = fn >= 0x140000000 && fn < 0x142000000;
+            if (name.Length == 0 || (!inModule && !ownedFns.Contains(fn)) || tail != 0xFFFFFFFF)
             { AgentState.Fail($"registry record {i} invalid (name='{name}' fn=0x{fn:X} tail=0x{tail:X})"); return false; }
             if (index.ContainsKey(name))
                 AgentState.Log($"registry alias: {name} at {index[name]} and {i} (same-fn platform stub, last wins)");

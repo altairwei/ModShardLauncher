@@ -49,8 +49,18 @@ public sealed class LiveSession : IDisposable
     public static LiveSession ForRunningGame(LiveQuotas quotas,
         Func<IReadOnlyList<(int, string)>> shellBuckets)
     {
-        var proc = Process.GetProcessesByName("StoneShard").FirstOrDefault()
-            ?? throw new InvalidOperationException("StoneShard.exe 未运行");
+        // 多个 StoneShard 进程时取最新启动的：残留挂起进程（崩溃循环遗留）的 agent
+        // 仍在监听自己的 msl-live-<pid> 管道但线程冻结，FirstOrDefault 任挑一个会让
+        // 握手静默超时（Task 16 循环 #6 真机实测 13:47 的 receive timeout）
+        var procs = Process.GetProcessesByName("StoneShard")
+            .Select(p => { DateTime st; try { st = p.StartTime; } catch { st = DateTime.MinValue; } return (Proc: p, Start: st); })
+            .OrderByDescending(t => t.Start)
+            .ToList();
+        if (procs.Count == 0)
+            throw new InvalidOperationException("StoneShard.exe 未运行");
+        var (proc, start) = procs[0];
+        Log.Information("[live] 目标进程 StoneShard#{Pid}（启动于 {Start:HH:mm:ss}，共 {Count} 个候选）",
+            proc.Id, start, procs.Count);
         return new LiveSession($"msl-live-{proc.Id}",
             () => Main.Instance.mslVersion,
             () => Gen8Guard.VersionOf(ModLoader.Data),
