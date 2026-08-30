@@ -43,9 +43,11 @@ public static unsafe class Boot
         try
         {
             NativeRegistration.RegisterAll();
-            // fix-loop #9：boot 期后台建索引——游戏刚建完 exec 节点（扫描得见全量）、
-            // data.win 页多驻留（构建在秒级）；此前在首连 SelfCheck 里同步跑，真机实测
-            // 26min43s（游戏工作集被扫描逐出 → 38K 命中散读全是页错误），hello 迟到超时。
+            // fix-loop #9：索引构建移 boot 期后台（此前在首连 SelfCheck 里同步跑，真机实测
+            // 26min43s——游戏工作集被扫描逐出 → 38K 命中散读全是页错误，hello 迟到超时）。
+            // fix-loop #10 更正：该时刻 exec 节点尚未创建（真机两次实测 natives registered
+            // 后 ~80ms 扫描 0 命中）——节点是 data.win 装载绑定（注册器之后）才批量出现，
+            // BeginBuild 内置有界重试等它。
             NodeIndex.BeginBuild();
         }
         catch (Exception ex) { AgentState.Log("RegisterAll failed: " + ex); }

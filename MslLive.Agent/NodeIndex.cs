@@ -15,11 +15,26 @@ public static class NodeIndex
     /// <summary>测试缝：Build 入口注入延迟（钉「hello 不等构建」的时序契约）。</summary>
     internal static Action? BuildDelayHook;
 
-    /// <summary>boot 期（OnInitGML，游戏建完 exec 节点后的最早安全点）后台构建索引。
+    // fix-loop #10 真机证据（agent.log 21:17/21:29 两次 boot）：OnInitGML 注册器时刻
+    // （natives registered 后 ~80ms）执行节点尚未创建——扫描 75ms 即完成、0 命中；节点是
+    // data.win 装载绑定（注册器之后的 boot 阶段）才批量出现的（旁证：15:25 主菜单态索引
+    // 已有 34,720 ≈ 全部 34,743 个 code entry——装载期创建，非游玩惰性创建）。
+    // 因此 boot 期构建带有界重试：等绑定完成再扫；seam 供测试调节奏。
+    /// <summary>规模门槛：一次构建收录 ≥ 此数即视为成功（Stoneshard ~34,720）。</summary>
+    internal static int MinNodes = 30000;
+    /// <summary>最多尝试次数（默认 60 × 5s = 5 分钟窗口，覆盖最慢 boot+装载）。</summary>
+    internal static int RetryMaxAttempts = 60;
+    /// <summary>尝试间隔（boot 期扫描本身 ~秒级，间隔无须太密）。</summary>
+    internal static int RetryIntervalMs = 5000;
+
+    /// <summary>boot 期（OnInitGML 注册器之后）后台构建索引。
     /// fix-loop #9：原先在首连 SelfCheck 里同步跑——真机实测 26min43s（扫全部提交私有 RW 区 +
     /// 38K 命中散读，游戏 3.3GB 工作集被扫描逐出后每次解引用 ~4ms 页错误），hello 被堵到
-    /// MSL 10s 超时之后才发出。boot 期内存新鲜（data.win 刚加载、页多驻留），构建在秒级；
-    /// 就算慢，握手路径也不再有人等它——hello 每连接快照现状（PipeServer.Handle）。</summary>
+    /// MSL 10s 超时之后才发出。
+    /// fix-loop #10：该时刻执行节点尚未创建（见上）——构建带重试直到达 MinNodes 门槛；
+    /// 重试期间是瞬态（hello 报 "node index building"，不进 Fail 累积），只有耗尽放弃才
+    /// Fail（构建线程是唯一知道总数的地方，护栏在这报）。就算慢，握手路径也没人等它——
+    /// hello 每连接快照现状（PipeServer.Handle）。</summary>
     public static void BeginBuild()
     {
         lock (startLock)
@@ -30,16 +45,32 @@ public static class NodeIndex
         new Thread(() =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            try
+            for (int attempt = 1; ; attempt++)
             {
-                int nodes = Build();
-                if (nodes < 30000) AgentState.Fail($"node index too small ({nodes})");   // 规模护栏在唯一知道总数的构建线程上报
-                AgentState.Log($"node index built: {nodes} nodes in {sw.ElapsedMilliseconds}ms");
-            }
-            catch (Exception ex)
-            {
-                AgentState.Fail("node index build failed: " + ex.Message);
-                AgentState.Log("node index build failed: " + ex);
+                int nodes;
+                var t = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    nodes = Build();
+                }
+                catch (Exception ex)
+                {
+                    AgentState.Fail("node index build failed: " + ex.Message);
+                    AgentState.Log("node index build failed: " + ex);
+                    break;
+                }
+                if (nodes >= MinNodes)
+                {
+                    AgentState.Log($"node index built: {nodes} nodes in {sw.ElapsedMilliseconds}ms (attempt {attempt})");
+                    break;
+                }
+                AgentState.Log($"node index attempt {attempt}: {nodes} nodes in {t.ElapsedMilliseconds}ms, retrying in {RetryIntervalMs}ms");
+                if (attempt >= RetryMaxAttempts)
+                {
+                    AgentState.Fail($"node index too small ({nodes})");
+                    break;
+                }
+                Thread.Sleep(RetryIntervalMs);
             }
             ready.Set();   // 放 Fail/Log 之后：WaitReady 醒来时 Status 已定稿（hello 串不再有竞态）
         }) { IsBackground = true, Name = "msl-live-index" }.Start();
@@ -96,5 +127,8 @@ public static class NodeIndex
         lock (startLock) started = false;
         ready.Reset();
         byName = new Dictionary<string, NodeInfo>();
+        MinNodes = 30000;
+        RetryMaxAttempts = 60;
+        RetryIntervalMs = 5000;
     }
 }

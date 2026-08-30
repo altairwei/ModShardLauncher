@@ -178,6 +178,7 @@ public class PipeProtocolTests : IDisposable
             AgentState.NodeSigFn = 0x1406BE508;
             AgentState.ExecVtable = 0x14066AC48;
             PlantStubNode(0x10100, 0x10C00, Stub);
+            NodeIndex.MinNodes = 1;                     // 1 节点即达标：首轮成功（否则默认重试节奏会挂死用例）
             NodeIndex.BuildDelayHook = () => Thread.Sleep(400);
             NodeIndex.BeginBuild();
 
@@ -189,6 +190,7 @@ public class PipeProtocolTests : IDisposable
         finally
         {
             NodeIndex.BuildDelayHook = null;
+            NodeIndex.ResetForTest();       // 复位重试 seam，防泄漏进同进程后续用例
             Mem.TestMap = null;
             AgentState.NodeSigFn = AgentState.ExecVtable = 0;
         }
