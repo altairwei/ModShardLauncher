@@ -124,8 +124,12 @@ namespace ModShardLauncher
                 locals.Locals.Add(argsLocal);
                 code.LocalsCount = 1;
                 ModLoader.Data.CodeLocals.Add(locals);
-                code.ReplaceGML(codeAsString, ModLoader.Data);
+                // 根必须先入列再编译：GMS2.3 编译器把 function 声明生成的 gml_Script_*
+                // 子 wrapper 插在 Code[IndexOf(根)+1]；根不在列表时（IndexOf=-1）子
+                // wrapper 落到列表头，保存后拿到退化地址 4（FORM size 字段）——真机
+                // splash 后闪退的根因，见 CodeUtilsAddFunctionTests。
                 ModLoader.Data.Code.Add(code);
+                code.ReplaceGML(codeAsString, ModLoader.Data);
                 return code;
             }
             catch
