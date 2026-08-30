@@ -6,9 +6,9 @@ using Xunit;
 namespace MslLive.Test;
 
 /// <summary>ProofVerify 端到端（合成内存）：TestMap 里种节点 + 活 buffer，
-/// 走「节点链 → 校准收割 → 独立编码 → 全等直读 + 头窗唯一性」全链。
+/// 走「节点链 → 校准收割 → 独立编码 → 全等直读」全链。
 /// 成功例的活 buffer 操作数就是校准真值（i:spr=1215 经收割进表后被 Translator 复现）；
-/// 失败例逐个钉 fail-closed 语义：篡改 / 形态错 / 未解析 / 别名子节点 / 唯一性多命中。</summary>
+/// 失败例逐个钉 fail-closed 语义：篡改 / 形态错 / 未解析 / 别名子节点。</summary>
 public class ProofVerifyTests : IDisposable
 {
     const ulong SIG = 0x1406BE508;      // 与 addresses.h kNodeSigFn 同形（值本身只是扫描靶）
@@ -155,7 +155,7 @@ public class ProofVerifyTests : IDisposable
     }
 
     [Fact]
-    public void LongBuffer_UniqueHeadWindow_Verifies()
+    public void LongBuffer_Verifies()
     {
         var live = BcEncoder.Encode(PopzChain(12).Instructions, new Translator(PopzChain(12)));   // 48B
         Assert.Equal(48, live.Length);
@@ -166,13 +166,20 @@ public class ProofVerifyTests : IDisposable
     }
 
     [Fact]
-    public void LongBuffer_DuplicateHeadWindow_Fails()
+    public void LongBuffer_DuplicateCopyElsewhere_StillVerifies()
     {
+        // fix-loop #13（真机 07:10）：35/35 op 全死在旧的头窗全局唯一性检查——
+        // agent 自己的 live/encoded 临时副本就躺在被扫的进程内 GC 堆上（Mem.ScanAob
+        // 枚举本进程全地址空间），命中数结构性 ≥3（BufPtr+live+encoded），检查逻辑上
+        // 永不可能通过；walk 结束 GC 清场后外部复扫全进程只剩 BufPtr 一 hit，证实多
+        // 命中是自扫伪影而非游戏内存真有副本。本测试把「同字节副本在别处存在」钉成
+        // 不构成失败：全等直读只对节点链指向的 buffer 本身负责，运行时无任何路径
+        // 靠 AOB 定位（apply/trampoline 全部 record+0x18 直达）。
         var live = BcEncoder.Encode(PopzChain(12).Instructions, new Translator(PopzChain(12)));
         PlantNode("test_proof", live);
-        live.CopyTo(Mem.TestMap!, (int)(0x11800 - Base));   // 同字节第二份 → 头窗不再全局唯一
+        live.CopyTo(Mem.TestMap!, (int)(0x11800 - Base));   // 同字节第二份 → 不再影响自证
         var ack = RunOne(PopzChain(12));
-        Assert.False(ack.Ok);
-        Assert.Contains("head-window hits=2", ack.Error);
+        Assert.True(ack.Ok, ack.Error);
+        Assert.Equal(1, ack.Verified);
     }
 }

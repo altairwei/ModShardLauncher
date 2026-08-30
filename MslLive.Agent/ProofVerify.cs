@@ -4,16 +4,17 @@ namespace MslLive.Agent;
 
 /// <summary>AOB 编码自证（握手 proof 信封的处理器）：对每个 proof op——
 /// ① 节点链取活 buffer（执行记录 +0x18/+0x08）；② VarCalibrator 读回真实变量 id 并做形态校验；
-/// ③ Translator+BcEncoder 独立编码；④ 双条件：命中点全等 ∧ 头窗全局唯一。
-/// 计划原文的全 pattern ScanAob 调整为「全等直读 + min(96,len) 头窗唯一性」：
-/// 全等直读在强度上 ⊇ AOB-at-hit；64 op × 全内存 712B 扫描是分钟级，窗口扫描毫秒级。
-/// 短 buffer（&lt;48B）不查全局唯一性——return-0 级微 stub 的短 pattern 在相邻 buffer
-/// 竞技场里必然多重命中，唯一性工具对它们不适用；节点链结构校验 + 全等直读已足够。</summary>
+/// ③ Translator+BcEncoder 独立编码；④ 命中点全等直读（整 buffer 逐字节）。
+/// 计划原文「全 pattern ScanAob 全局唯一命中」的两次修正：
+/// ①（实现期）改为全等直读——强度 ⊇ AOB-at-hit（整 buffer ≠ 96B 窗口）；
+/// ②（fix-loop #13 真机实测）删掉头窗全局唯一性残留——ScanAob 枚举的是 agent 所在
+/// 进程的全地址空间，而本方法的 live/encoded 临时副本就在进程内 GC 堆上，命中数
+/// 结构性 ≥3（BufPtr+live+encoded，外加 GC 未回收的增容遗留），该检查逻辑上永不可能
+/// 通过（真机 35/35 全死于此；walk 后 GC 清场，外部复扫全进程仅剩 BufPtr 一 hit）；
+/// 且每 op 全内存扫描实测 6m13s/35op，是 proofAck 30s 超时的直接成本。spec 无唯一性
+/// 要求；运行时无消费者（apply/trampoline 均 record+0x18 直达，不走 AOB）。</summary>
 public static class ProofVerify
 {
-    const int UniquenessMinLen = 48;
-    const int UniquenessWindow = 96;
-
     public static ProofAck Run(ProofMsg msg)
     {
         int verified = 0, failed = 0;
@@ -47,17 +48,6 @@ public static class ProofVerify
                     failed++;
                     errors.Add($"{op.Entry}: encoded != live @0x{node.BufPtr:X} (first diff {FirstDiff(encoded, live)})");
                     continue;
-                }
-                if (encoded.Length >= UniquenessMinLen)
-                {
-                    var window = encoded.Take(Math.Min(UniquenessWindow, encoded.Length)).Cast<byte?>().ToArray();
-                    var hits = Mem.ScanAob(window);
-                    if (hits.Count != 1 || hits[0] != node.BufPtr)
-                    {
-                        failed++;
-                        errors.Add($"{op.Entry}: head-window hits={hits.Count}, expected unique @0x{node.BufPtr:X}");
-                        continue;
-                    }
                 }
                 verified++;
             }
