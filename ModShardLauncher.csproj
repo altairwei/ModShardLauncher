@@ -164,6 +164,11 @@
 
   <ItemGroup>
     <Page Remove="Externals\**\*.xaml" />
+    <!-- Externals 下是 UTMT 参考源码树（非编译目标）：默认 resx glob 会把两份
+         UndertaleModTool\Windows\TextInput.resx 都收进 EmbeddedResource，
+         输出路径冲突（MSB3577）。与 Page Remove 同理排除。 -->
+    <EmbeddedResource Remove="Externals\**\*.resx" />
+    <None Remove="Externals\**" />
   </ItemGroup>
 
   <ItemGroup>

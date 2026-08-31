@@ -52,6 +52,24 @@ public class GoldenEncodeTests
         Assert.Equal(fileForm, encoded);   // 非翻译字段（opcode 字/分支/字面量/RefTop）无损往返
     }
 
+    [Fact]
+    public void Encode_PushEBreakEInt16Literals_WriteValueIntoWord()
+    {
+        // fix-loop #14 真机 golden（bufdump @StoneShard#28080 只读直取活体 buffer）：
+        //   push.e 1   → 01 00 0F C0（布尔物化舞步：cmp; b; push.e 1; bf）
+        //   break.e -5 → FB FF 0F FF（数组边界标记：push.i 983040; break.e -5）
+        // S2 黄金 entry 的 110 条指令里没有这两类形态（已核）——覆盖洞正是 #14 溜到真机才暴露的原因。
+        // push.e 此前落进 TypeInst 臂（Inst=Undefined→写 0）；break.e 走 Cat.Break verbatim Low16，
+        // 值由提取侧 #14 修复携带。
+        var sems = new List<SemInstruction>
+        {
+            new() { Kind = 0xC0, T1 = 0x0F, T2 = 0x00, Low16 = 0x0001, Int = 1 },   // push.e 1
+            new() { Kind = 0xFF, T1 = 0x0F, T2 = 0x00, Low16 = 0xFFFB, Int = -5 },  // break.e -5
+        };
+        byte[] encoded = BcEncoder.Encode(sems, new FileFormResolver());
+        Assert.Equal(new byte[] { 0x01, 0x00, 0x0F, 0xC0, 0xFB, 0xFF, 0x0F, 0xFF }, encoded);
+    }
+
     /// <summary>文件形态解析器：引用占位 0xDEAD（变量 top 字节由编码器从 RefTop 回填）、
     /// 字符串占位 0——即 runner 装载前的静态形态（findings-t11：0x?000DEAD）。</summary>
     sealed class FileFormResolver : IOperandResolver

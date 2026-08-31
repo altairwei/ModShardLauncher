@@ -156,8 +156,21 @@ public static class RefsExtractor
             Low16 = inst.Kind switch
             {
                 UndertaleInstruction.Opcode.PushI => (ushort)Convert.ToInt16(inst.Value ?? 0),
+                // GMS 2.3 的 int16 字面量另有两种形态（fix-loop #14 真机证明）：
+                // push.e（布尔物化舞步 push.e 1）与 break.e（数组边界标记 break.e -5）——
+                // 字面量同样住在 inst.Value。注意 pop.e+Int16 是交换指令（UTMT #129），
+                // 其 low16 语义就是 SwapExtra，被 when 守卫刻意排除。
+                UndertaleInstruction.Opcode.Push or UndertaleInstruction.Opcode.Break
+                    when inst.Type1 == UndertaleInstruction.DataType.Int16 => (ushort)Convert.ToInt16(inst.Value ?? 0),
                 UndertaleInstruction.Opcode.Call => inst.ArgumentsCount,
                 UndertaleInstruction.Opcode.Cmp => (byte)inst.ComparisonKind,
+                // SingleType 指令的 low16 也不在 SwapExtra（wordroundtrip 全库对账 + classic
+                // 0.6.1.0 反射实证）：dup 的计数在 Extra(b0)、特型 dup（swap 舞步）的第二
+                // 字节在 ComparisonKind(b1)，callv 的 argc 在 Extra(b0)。classic 对这两者
+                // 独立存取并原样回写（MSL 序列化产物里 file=04 00 02 86 保留完好即证）；
+                // SwapExtra 恒 0，落默认臂会把 VM 要读的 dup 计数 / callv argc 清零。
+                UndertaleInstruction.Opcode.Dup or UndertaleInstruction.Opcode.CallV =>
+                    (ushort)(inst.Extra | ((int)inst.ComparisonKind << 8)),
                 _ => inst.SwapExtra,
             },
             Jump = inst.Kind is UndertaleInstruction.Opcode.B or UndertaleInstruction.Opcode.Bt

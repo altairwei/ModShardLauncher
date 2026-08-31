@@ -110,15 +110,16 @@ public static class BcEncoder
                     break;
                 }
                 case Cat.Pop:
-                case Cat.Push when sem.Kind != OpPushI:
+                case Cat.Push when sem.Kind != OpPushI && sem.T1 != TInt16:
                     w |= (ushort)sem.Inst;   // TypeInst 位（局部 -7 / 全局 -5 / self -1 / arg -15 / stacktop 0…）
                     break;
-                case Cat.Push:   // PushI：值在 low16（新资产字面量经标注后也要翻译 low16）
+                case Cat.Push:   // pushi.e 与 push.e（T1=Int16）字面量：值在 low16（fix-loop #14 真机证明
+                                  // push.e 形态存在——布尔物化舞步；新资产字面量经标注后也要翻译 low16）
                     if (sem.AssetKinds is { Count: > 0 })
                     {
                         int rt = ResolveAsset(sem, resolver);
                         if (rt != (short)rt)
-                            throw new TranslationRejectException($"asset runtime index {rt} overflows pushi.e i16");
+                            throw new TranslationRejectException($"asset runtime index {rt} overflows push i16 (pushi.e/push.e)");
                         w |= (ushort)(short)rt;
                     }
                     else w |= sem.Low16;
