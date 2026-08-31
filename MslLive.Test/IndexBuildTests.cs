@@ -122,4 +122,18 @@ public class IndexBuildTests : IDisposable
         Assert.False(NodeIndex.TryGet("a", out _));
         Assert.True(NodeIndex.TryGet("b", out _));
     }
+
+    /// <summary>fix-loop #15（13:40 proof 31/4 根因）：GMS 2.3 匿名函数名全库 403 条 >128 字符
+    /// （最长 513）。NodeIndex 读名 ReadCString(…,128) 把 node 名截成 128 前缀当 key →
+    /// TryGet(全名) 永远 miss → Translator.ResolveCall 误报「not in registry, not in node
+    /// index」（node 其实都在）。名字取 agent.log:6637 四条失败名里最短的一条（132 字符）钉住
+    /// 真实形态。</summary>
+    [Fact]
+    public void Build_LongEntryName_IsIndexedUnderFullName()
+    {
+        string name = "gml_Script____struct___1_anon_ctr_fog_raycast_gml_GlobalScript_ctr_fog_raycast_1825_ctr_fog_raycast_gml_GlobalScript_ctr_fog_raycast";
+        PlantNode(0x10100, 0x10C00, name);
+        Assert.Equal(1, NodeIndex.Build());
+        Assert.True(NodeIndex.TryGet(name, out _));  // 全名（非 128 前缀）必须可查
+    }
 }

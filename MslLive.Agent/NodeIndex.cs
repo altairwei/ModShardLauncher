@@ -27,6 +27,15 @@ public static class NodeIndex
     /// <summary>尝试间隔（boot 期扫描本身 ~秒级，间隔无须太密）。</summary>
     internal static int RetryIntervalMs = 5000;
 
+    // fix-loop #15（13:40 proof 31/4 根因）：读名截断 128 字符导致长名条目查不到。
+    // GMS 2.3 匿名函数名全库 403 条 >128 字符（F049BBB3 实测，最长 513——agent.log:6637
+    // 四条失败名 201/132/137/513）。128 前缀当 key → TryGet(全名) 永远 miss →
+    // Translator.ResolveCall 对匿名函数引用误报「not in registry, not in node index」
+    // （node 其实都在——索引计数缺口由同前缀兄弟名碰撞塌缩独立解释：34422−4=34418
+    // 期望 vs 34412 实测，仅剩 ~6 条另有原因）。上限 1024 = 实测最长再留一倍余量；
+    // ReadCString 有 NUL 与逐字节可读性双守卫，读长只影响那 403 条，平均名长 ~30 不变。
+    internal const int NodeNameMax = 1024;
+
     /// <summary>boot 期（OnInitGML 注册器之后）后台构建索引。
     /// fix-loop #9：原先在首连 SelfCheck 里同步跑——真机实测 26min43s（扫全部提交私有 RW 区 +
     /// 38K 命中散读，游戏 3.3GB 工作集被扫描逐出后每次解引用 ~4ms 页错误），hello 被堵到
@@ -89,7 +98,7 @@ public static class NodeIndex
 
     /// <summary>S2 字段表验证链（Task 11 Step 5 活体复核过 +0x64/+0x68/+0x88/+0xA0/+0xA4 与
     /// exec +0x00/+0x18）：qword==NodeSigFn 命中 → +0x64==0x00FFFFFF → +0x68→record 且
-    /// record+0x00==ExecVtable → +0x80 名字可打印（≤128B）→ 收录。</summary>
+    /// record+0x00==ExecVtable → +0x80 名字可打印（≤NodeNameMax）→ 收录。</summary>
     public static int Build()
     {
         BuildDelayHook?.Invoke();
@@ -109,7 +118,7 @@ public static class NodeIndex
         if (Mem.ReadU32(hit + 0x64) != 0x00FFFFFF) return false;
         ulong record = Mem.ReadU64(hit + 0x68);
         if (record == 0 || Mem.ReadU64(record) != AgentState.ExecVtable) return false;
-        name = Mem.ReadCString(Mem.ReadU64(hit + 0x80), 128);
+        name = Mem.ReadCString(Mem.ReadU64(hit + 0x80), NodeNameMax);
         if (name.Length == 0) return false;
         info = new NodeInfo(hit, record,
             Mem.ReadU32(hit + 0x88), Mem.ReadU32(hit + 0x9C),
