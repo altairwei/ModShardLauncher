@@ -94,6 +94,47 @@ public class LiveStubInjectorTests : IDisposable
             i => i.Function?.Target?.Name?.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
     }
 
+    /// <summary>#18（真机 22:43 实证：AcquireBlanks 5×-1、「report calibrated」全历史零次）：
+    /// GMS2.3 运行时只从 Layer 侧创建房间实例——vanilla START 两实例两侧镜像、若两侧都读
+    /// vanilla 实例会双生；TW initializer 双侧写入（AddGameObject，多年可用）。旧代码只写
+    /// legacy GameObjects（与 ModLoader.o_ScriptEngine 同款 bug）→ o_msl_live 从未生成 →
+    /// GameStart/Step 从未跑 → blank 分配/上报/校准全链死。</summary>
+    [Fact]
+    public void Inject_ManagerInstancePlacedInInstancesLayer()
+    {
+        var data = Load();
+        LiveStubInjector.Inject(data, new LiveQuotas());
+
+        var start = data.Rooms.First(r => r.Name.Content == "START");
+        var layer = start.Layers.Single(l => l.LayerType == UndertaleRoom.LayerType.Instances);
+        Assert.Contains(layer.InstancesData.Instances,
+            g => g.ObjectDefinition?.Name?.Content == "o_msl_live");
+    }
+
+    /// <summary>#18 自愈：历史产物里 manager 是 legacy-only 残留（旧代码病灶形态）——
+    /// 重注入后必须迁入 Layer 侧且 legacy 不重复（幂等以 Layer 侧为准）。</summary>
+    [Fact]
+    public void Inject_HealsLegacyOnlyManagerInstance()
+    {
+        var data = Load();
+        var q = new LiveQuotas();
+        LiveStubInjector.Inject(data, q);
+
+        // 人为打回 #18 病灶形态：实例从 Layer 侧摘掉、legacy 侧保留
+        var start = data.Rooms.First(r => r.Name.Content == "START");
+        var layer = start.Layers.Single(l => l.LayerType == UndertaleRoom.LayerType.Instances);
+        var placed = layer.InstancesData.Instances
+            .Single(g => g.ObjectDefinition?.Name?.Content == "o_msl_live");
+        layer.InstancesData.Instances.Remove(placed);
+
+        LiveStubInjector.Inject(data, q);   // 再注入 = 自愈
+
+        Assert.Contains(layer.InstancesData.Instances,
+            g => g.ObjectDefinition?.Name?.Content == "o_msl_live");
+        Assert.Equal(1, start.GameObjects.Count(
+            g => g.ObjectDefinition?.Name?.Content == "o_msl_live"));   // legacy 不重复
+    }
+
     /// <summary>dummy stub（"function X() { return 0; }"）的编译形态钉版：Task 14 的
     /// Trampoline 收尾字节校验以它为基准。wrapper 形态 = [B 跳过 body 到绑定尾][body][绑定尾]，
     /// 子条目 Offset=4 → child 从 body 第一条执行。body = pushi.e 0 + conv.i.v + ret.v

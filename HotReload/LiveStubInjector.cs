@@ -130,12 +130,19 @@ public static class LiveStubInjector
     static void EnsureManagerInstance(UndertaleData data, UndertaleGameObject manager)
     {
         var start = data.Rooms.First(t => t.Name.Content == "START");
-        if (start.GameObjects.Any(g => g.ObjectDefinition?.Name?.Content == ManagerObject)) return;
-        start.GameObjects.Add(new UndertaleRoom.GameObject
-        {
-            ObjectDefinition = manager,
-            InstanceID = data.GeneralInfo.LastObj++,
-        });
+        // #18 实证（roomprobe vanilla 对照 + TW 交叉）：GMS2.3 运行时只从 Layer 侧创建
+        // 房间实例——vanilla START 两实例两侧镜像（两侧都读会双生），TW initializer 经
+        // AddGameObject 双侧写入故多年可用。旧代码只写 legacy GameObjects（与 ModLoader
+        // o_ScriptEngine 同款 bug）→ o_msl_live 从未生成 → GameStart/Step 从未跑 →
+        // blank 分配/上报/校准全链死（真机 AcquireBlanks 5×-1；「report calibrated」
+        // agent.log 全历史零次）。修法 = TW 同款 AddGameObject 双侧写入；幂等以 Layer
+        // 侧为准，历史 legacy-only 残留先摘除避免重复。
+        var layer = start.GetLayer(UndertaleRoom.LayerType.Instances, "Instances");
+        if (layer.InstancesData.Instances.Any(g => g.ObjectDefinition?.Name?.Content == ManagerObject)) return;
+        for (int i = start.GameObjects.Count - 1; i >= 0; i--)
+            if (start.GameObjects[i].ObjectDefinition?.Name?.Content == ManagerObject)
+                start.GameObjects.RemoveAt(i);
+        start.AddGameObject("Instances", manager);
     }
 
     /// <summary>Step 事件 = apply 轮询 + blank 上报。上报放 Step 而不是 GameStart：
