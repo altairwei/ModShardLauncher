@@ -3,8 +3,9 @@ using MslLive.Shared;
 namespace MslLive.Agent;
 
 /// <summary>两阶段应用引擎（spec D4 全成或全弃）。
-/// Phase 1（pipe 线程，Enqueue）：逐 op resolve（NodeIndex；别名子节点拒绝——子条目是父
-/// blob 的组成部分，子 op 不该存在，CodeDiffer 已滤，此处为防御性守卫）→ validate（帧容量
+/// Phase 1（pipe 线程，Enqueue）：逐 op resolve（NodeIndex 直名优先；#17 实证：wrapper 根
+/// 按绑定创建无节点 → 回退 "gml_Script_"+名经子把住共享 buffer；直名命中子条目才拒——
+/// 子 op 不该存在，CodeDiffer 已滤，防御性守卫）→ validate（帧容量
 /// ≤ 语义：frameOwner = 共享 BufPtr 的最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
 /// 子体——子才是帧主；多子 wrapper 取最小偏移的主子），无别名子则节点自身；op.LocalsCount
 /// ≤ frameOwner.Locals——交换不 patch record+0x0C，帧容量以 boot 值为上限，载荷局部数
@@ -93,10 +94,20 @@ public static class ApplyEngine
     /// <summary>单 op Phase 1 链。失败 → 填好 receipt（Stage/Reason）返回 null。</summary>
     static Prepared? Prepare(OpMsg op, OpReceipt receipt)
     {
-        if (!NodeIndex.TryGet(op.Entry, out var node))
+        // #17 外扫实证（nodescan 普查）：运行时 exec 节点按「绑定」创建（SCPT/FUNC/事件/
+        // GlobalInit 指向谁谁才有节点），不按 Code 条目——wrapper 根（槽/loader/函数声明
+        // 裸根）刻意不入 GlobalInit 且无人指向 → 0 节点；SCPT/FUNC 都指向子 → 索引只有
+        // gml_Script_+名（StartOff=4，record 覆盖整 buffer，BufPtr=共享 buffer 基址）。
+        // op.Entry=裸根名直名 miss → 回退子名把住共享 buffer：子是句柄不是 op 目标，
+        // alias-child 守卫只对直名命中生效（直名命中且 StartOff≠0 = op 目标本身是子条目
+        // ——CodeDiffer 已滤，防御性守卫，见 Enqueue_AliasChildEntry_ResolveFail）。
+        if (NodeIndex.TryGet(op.Entry, out var node))
+        {
+            if (node.StartOff != 0)
+            { receipt.Reason = $"alias child entry (startOff={node.StartOff}), not swappable"; return null; }
+        }
+        else if (!NodeIndex.TryGet("gml_Script_" + op.Entry, out node))
         { receipt.Reason = "node not found"; return null; }
-        if (node.StartOff != 0)
-        { receipt.Reason = $"alias child entry (startOff={node.StartOff}), not swappable"; return null; }
 
         receipt.Stage = "validate";
         // 别名集 = 共享 buffer 的全部节点（S2④：根+子双记录同指 BUF）；帧主 = 最小

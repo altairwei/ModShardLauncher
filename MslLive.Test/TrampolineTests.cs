@@ -157,6 +157,33 @@ public class TrampolineTests : IDisposable
         Assert.Equal(ReportTrampoline, Mem.TestAllocs[reportPtr]);
     }
 
+    /// <summary>#17 外扫实证（nodescan 普查，mslRoot 67/67 无节点）：运行时 exec 节点按
+    /// 「绑定」创建，不按 Code 条目——wrapper 根刻意不入 GlobalInit 且无人指向 → 根 0 节点；
+    /// SCPT/FUNC 都指向子 → 索引里只有子 gml_Script_* 一条（StartOff=4，record len=68=
+    /// 整 buffer——不是子跨度 64，BufPtr=共享 buffer 基址）。Install 直名 miss 回退子名。</summary>
+    [Fact]
+    public void Install_RootHasNoNode_ResolvesViaChildEntry()
+    {
+        PlantNode(ApplyChildNode, ApplyChildRecord, ApplyChildName, ApplyBuf,
+            "gml_Script_" + Trampoline.ApplyName, 4, 68, WrapperDummy());
+        PlantNode(ReportChildNode, ReportChildRecord, ReportChildName, ReportBuf,
+            "gml_Script_" + Trampoline.ReportName, 4, 68, WrapperDummy());
+        Assert.Equal(2, NodeIndex.Build());
+        NativeRegistration.ApplyIndex = 900;
+        NativeRegistration.ReportIndex = 901;
+
+        Assert.True(Trampoline.Install(FakeRegistry), Trampoline.LastError);
+
+        ulong applyPtr = R64(ApplyChildRecord + 0x18);
+        Assert.Equal((uint)ApplyTrampoline.Length, R32(ApplyChildRecord + 0x08));
+        Assert.True(Mem.TestAllocs.ContainsKey(applyPtr));
+        Assert.Equal(ApplyTrampoline, Mem.TestAllocs[applyPtr]);
+
+        ulong reportPtr = R64(ReportChildRecord + 0x18);
+        Assert.Equal((uint)ReportTrampoline.Length, R32(ReportChildRecord + 0x08));
+        Assert.Equal(ReportTrampoline, Mem.TestAllocs[reportPtr]);
+    }
+
     [Fact]
     public void Install_IsIdempotent()
     {

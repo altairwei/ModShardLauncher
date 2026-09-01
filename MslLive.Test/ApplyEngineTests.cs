@@ -223,6 +223,29 @@ public class ApplyEngineTests : IDisposable
         Assert.Contains("alias child entry", r.Reason);
     }
 
+    /// <summary>#17 外扫实证：wrapper 根（槽/loader/函数声明裸根）无节点——索引只有子
+    /// gml_Script_*（StartOff=4，record 覆盖整 buffer）。op.Entry=裸根名直名 miss → 回退
+    /// 子名把住共享 buffer；子是 buffer 句柄不是 op 目标，alias-child 守卫只对直名命中生效
+    /// （<see cref="Enqueue_AliasChildEntry_ResolveFail"/> 钉住直名命中子仍拒）。</summary>
+    [Fact]
+    public void Enqueue_RootHasNoNode_ResolvesViaChildEntry()
+    {
+        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "gml_Script_msl_slot_0", startOff: 4);
+        NodeIndex.Build();
+
+        Assert.Null(ApplyEngine.Enqueue(Batch(PopzOp("msl_slot_0", 1))));   // 回退解析放行，非 alias-child 拒
+
+        ApplyEngine.Pump();
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+        Assert.Equal(4u, R32(AliasRecord + 0x08));                 // 1 × popz = 4B
+        ulong ptr = R64(AliasRecord + 0x18);
+        Assert.True(Mem.TestAllocs.ContainsKey(ptr));
+        Assert.Equal(BcEncoder.Encode(PopzOp("msl_slot_0", 1).Instructions, new Translator(new OpMsg())),
+            Mem.TestAllocs[ptr]);
+    }
+
     /// <summary>#16b：≤ 容量语义——载荷局部数 < 帧容量（用户删局部）是安全的
     /// （帧偏大无害），旧相等语义会误拒。</summary>
     [Fact]

@@ -13,8 +13,9 @@ namespace MslLive.Agent;
 /// （root len=68）。
 /// call 操作数经 Translator 走 Registry.IndexOf（原生注册后的真实槽位），并与
 /// NativeRegistration 捕获的索引交叉断言。旧 buffer 永不释放（S3 旧帧安全）。
-/// 根/子两条执行记录共享同一 buffer（S2④ 原文：两条执行记录 +0x18 同指 BUF）——
-/// 交换循环按 BufPtr 共享写两条记录（+0x08 长度、+0x18 指针，同值）。
+/// 根/子执行记录共享同一 buffer（S2④：两条执行记录 +0x18 同指 BUF；#17 实证修正：
+/// msl wrapper 根无节点，只有子一条记录）——交换循环按 BufPtr 收集全部共享记录
+/// （+0x08 长度、+0x18 指针同值写入，形态无关）。
 /// 幂等：进程内已安装的 stub 不重复安装（proof 重连重发不会把 trampoline 当 dummy 判死）。</summary>
 public static class Trampoline
 {
@@ -59,7 +60,13 @@ public static class Trampoline
     {
         if (installed.Contains(name)) return true;
         if (nativeIndex < 0) return Fail($"trampoline {name}: native not registered");
-        if (!NodeIndex.TryGet(name, out var node)) return Fail($"trampoline {name}: stub node not found");
+        // #17 外扫实证（nodescan 普查，mslRoot 67/67 无节点）：运行时 exec 节点按「绑定」创建
+        // （SCPT/FUNC/事件/GlobalInit 指向谁谁才有节点），不按 Code 条目——wrapper 根刻意
+        // 不入 GlobalInit 且无人指向 → 0 节点；SCPT/FUNC 都指向子 → 索引只有 gml_Script_+名
+        // 一条（StartOff=4，record len=68=整 buffer，BufPtr=共享 buffer 基址——dummy 头检查
+        // 在子 record 上照旧成立）。直名 miss 回退子名把住 buffer。
+        if (!NodeIndex.TryGet(name, out var node) && !NodeIndex.TryGet("gml_Script_" + name, out node))
+            return Fail($"trampoline {name}: stub node not found");
 
         var translator = new Translator(new OpMsg { Entry = name }, registryIndexOf: registryIndexOf);
         byte[] head = BcEncoder.Encode(WrapperHead.ToList(), translator);
