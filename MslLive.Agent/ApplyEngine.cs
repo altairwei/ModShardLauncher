@@ -3,13 +3,17 @@ using MslLive.Shared;
 namespace MslLive.Agent;
 
 /// <summary>两阶段应用引擎（spec D4 全成或全弃）。
-/// Phase 1（pipe 线程，Enqueue）：逐 op resolve（NodeIndex；别名子节点拒绝）→ validate
-/// （LocalsCount 两处核对——节点 +0xA0 与执行记录 +0x0C 须彼此相等且等于载荷）→ 编码
-/// （Translator/BcEncoder，Reject 归 validate）→ VirtualAlloc(RW) 写新 buffer（失败归 validate
-/// 提前量——commit 设计为不可失败）→ 收集共享旧 buffer 的全部执行记录（S2④ 父子别名同 buffer，
-/// S3 交换面 = 执行记录 +0x18）。任一 op 失败 → 整批不入队：已分配 buffer 留置不 free（与旧
-/// buffer 同策），一个都不换（半应用 = 新旧代码互相调用 = 状态不一致），失败 op 记真实原因、
-/// 其余记 batch aborted。
+/// Phase 1（pipe 线程，Enqueue）：逐 op resolve（NodeIndex；别名子节点拒绝——子条目是父
+/// blob 的组成部分，子 op 不该存在，CodeDiffer 已滤，此处为防御性守卫）→ validate（帧容量
+/// ≤ 语义：frameOwner = 共享 BufPtr 的最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
+/// 子体——子才是帧主；多子 wrapper 取最小偏移的主子），无别名子则节点自身；op.LocalsCount
+/// ≤ frameOwner.Locals——交换不 patch record+0x0C，帧容量以 boot 值为上限，载荷局部数
+/// 超容量即拒（v1 已知限制：locals 数增长不热更）；另核对全部别名的 node+0xA0 ==
+/// record+0x0C 镜像一致——交换面完整性）→ 编码（Translator/BcEncoder，Reject 归
+/// validate）→ VirtualAlloc(RW) 写新 buffer（失败归 validate 提前量——commit 设计为不可失败）
+/// → 收集共享旧 buffer 的全部执行记录（S2④ 父子别名同 buffer，S3 交换面 = 执行记录 +0x18）。
+/// 任一 op 失败 → 整批不入队：已分配 buffer 留置不 free（与旧 buffer 同策），一个都不换
+/// （半应用 = 新旧代码互相调用 = 状态不一致），失败 op 记真实原因、其余记 batch aborted。
 /// Phase 2（游戏线程，msl_live_apply thunk → Pump）：先补上一批的 pendingRestore（trigger 配对
 /// restore，下一帧此刻 RunGml 已跑完一帧），再逐 prepared 写 record+0x08 长度、+0x18 指针
 /// （游戏线程无并发读者；旧 buffer 永不释放）。restore op 不当帧换入——记为 pendingRestore，
@@ -95,11 +99,21 @@ public static class ApplyEngine
         { receipt.Reason = $"alias child entry (startOff={node.StartOff}), not swappable"; return null; }
 
         receipt.Stage = "validate";
-        if (node.Locals != (uint)op.LocalsCount)
-        { receipt.Reason = $"locals mismatch: payload {op.LocalsCount} != node {node.Locals}"; return null; }
-        uint recordLocals = Mem.ReadU32(node.Record + 0x0C);
-        if (recordLocals != node.Locals)
-        { receipt.Reason = $"locals mismatch: node {node.Locals} != record+0x0C {recordLocals}"; return null; }
+        // 别名集 = 共享 buffer 的全部节点（S2④：根+子双记录同指 BUF）；帧主 = 最小
+        // StartOff 的别名子（执行面），无子则节点自身（普通事件条目）
+        var aliases = NodeIndex.All.Where(n => n.BufPtr == node.BufPtr).ToList();
+        var frameOwner = aliases.Where(n => n.StartOff != 0).OrderBy(n => n.StartOff).FirstOrDefault() ?? node;
+        // 容量语义：交换不 patch record+0x0C（零运行时 patch），帧以 boot 值定容——
+        // 载荷局部数 ≤ 容量即安全（帧偏大无害），超容量 = 溢出风险，拒
+        if (op.LocalsCount < 0 || (uint)op.LocalsCount > frameOwner.Locals)
+        { receipt.Reason = $"locals mismatch: payload {op.LocalsCount} > frame capacity {frameOwner.Locals}"; return null; }
+        // 镜像完整性：全部别名的 node+0xA0 与各自 record+0x0C 必须一致（交换面双侧真源同源）
+        foreach (var a in aliases)
+        {
+            uint recordLocals = Mem.ReadU32(a.Record + 0x0C);
+            if (recordLocals != a.Locals)
+            { receipt.Reason = $"locals mismatch: node {a.Locals} != record+0x0C {recordLocals}"; return null; }
+        }
 
         byte[] bytes;
         try { bytes = BcEncoder.Encode(op.Instructions, new Translator(op)); }
@@ -109,7 +123,7 @@ public static class ApplyEngine
         ulong newBuf = Mem.AllocRW(bytes);
         if (newBuf == 0) { receipt.Reason = "VirtualAlloc failed"; return null; }   // commit 不可失败 → 提前量归 validate
 
-        var records = NodeIndex.All.Where(n => n.BufPtr == node.BufPtr).Select(n => n.Record).ToList();
+        var records = aliases.Select(n => n.Record).ToList();
         if (records.Count == 0) { receipt.Reason = "no execution records share the buffer"; return null; }
         return new Prepared { Op = op, Bytes = bytes, Records = records, NewBuf = newBuf, Receipt = receipt };
     }

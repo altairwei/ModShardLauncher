@@ -154,6 +154,7 @@ public static class HotPipeline
         HashSet<string> bootFnNames, Dictionary<string, int> strg, SessionState alloc, ref int seq)
     {
         string targetEntry = entry.Name;
+        bool slotTargeted = false;
         var m = ObjectEventName.Match(entry.Name);
         if (m.Success && !ObjectExistsIn(boot, m.Groups[1].Value))
         {
@@ -174,9 +175,13 @@ public static class HotPipeline
             }
             else
             {
-                // product-only 脚本 → 槽位
-                targetEntry = alloc.AllocateScript(FunctionNameOf(entry.Name));
-                targetEntry = CodeNameForSlot(entry.Name, targetEntry);
+                // product-only 脚本 → 槽位。载荷必须是 wrapper 形态（function 声明编译产物
+                // [B][body][exit][tail]——调用面 = 子入口 +4，S2②/S2④）；裸体形态（无子条目，
+                // 旧 AddFunction("return 42;") 风格）在产品里本就 runtime 不可调用——fail-closed。
+                if (entry.Product.ChildEntries.Count == 0)
+                    throw new OverlayException($"{entry.Name}: 非函数声明形态（无子条目）——槽载荷需 wrapper——需重启");
+                slotTargeted = true;
+                targetEntry = alloc.AllocateScript(ScriptSlotKey(entry.Name));
             }
         }
 
@@ -184,34 +189,47 @@ public static class HotPipeline
         var op = new OpMsg
         {
             Seq = seq++, Kind = "swap", Entry = targetEntry,
-            LocalsCount = (int)entry.Product.LocalsCount,
+            // LocalsCount：wrapper 形态取偏移 4 主子的值（函数体真值——编译器对子条目取
+            // patch.LocalsCount=distinct；根值是根作用域公式恒 1，无信息量）；普通条目取自身
+            // （事件/CC 走 AddCode 的「+1 for arguments」公式 = 1+distinct，与 boot 同式可直接比较）
+            LocalsCount = (int)(entry.Product.ChildEntries.FirstOrDefault(c => c.Offset == 4)?.LocalsCount
+                ?? entry.Product.LocalsCount),
             Instructions = payload.Instructions,
             Variables = payload.Variables,   // 变量名不改写：agent 用 VarsMsg 映射，未映射即拒
             Functions = OverlayFunctions(payload.Functions, bootFnNames, alloc),
         };
+        if (slotTargeted)
+        {
+            // 尾部两处重写：绑定尾的 fnref/self-var 从产品名改到槽名——槽名在 boot 可解析
+            string bare = BareScriptName(entry.Name);
+            RewriteBindingTail(payload.Instructions,
+                "gml_Script_" + bare, "gml_Script_" + targetEntry, bare, targetEntry);
+        }
         foreach (var s in payload.Strings)
             op.Strings.Add(new StrRef { Content = s, StrgIndex = strg.GetValueOrDefault(s, -1) });
         foreach (var sem in op.Instructions)
-            if (sem.Fn != null && alloc.ScriptSlots.TryGetValue(sem.Fn, out var slot))
-                sem.Fn = slot;
+            if (sem.Fn != null && alloc.ScriptSlots.TryGetValue(ScriptSlotKey(sem.Fn), out var slot))
+                sem.Fn = "gml_Script_" + slot;   // S2②：调用操作数 = 100000+子 codeId——裸槽名会解析到根（绑定尾）而非函数体
         foreach (var a in payload.Assets)
             op.Assets.Add(ResolveAsset(a, boot, product, alloc));
         return op;
     }
 
     /// <summary>RunGml 三 op（Task 15 的 agent 语义）：trigger 把 step entry 换成
-    /// 「正常体 + msl_loader_0()」；restore 换回正常体；loader 换 msl_loader_0 本体。
+    /// 「正常体 + msl_loader_0()」；restore 换回正常体；loader 换 msl_loader_0 本体
+    /// （#16b：loader 载荷改 scratch wrapper 编译——槽 stub 是 function 声明形态，
+    /// 调用面 = 子入口 +4，平文本载荷会把子入口落进指令中间）。
     /// 全部对 boot baseline 编译（名字在 boot 全部可解析；字符串播种由 Task 8 保证）。
     /// ReplaceGML 对全部存在的名字/字符串是非变异的——前后计数做触发线，变了就记警告
     /// （意味着播种/模板漏了什么，属于 bug 而非静默通过）。</summary>
-    static List<OpMsg> BuildLoaderOps(string gmlText, UndertaleData boot, Dictionary<string, int> strg, ref int seq)
+    internal static List<OpMsg> BuildLoaderOps(string gmlText, UndertaleData boot, Dictionary<string, int> strg, ref int seq)
     {
         var ops = new List<OpMsg>();
         ops.Add(CompileTextOp(LiveStubInjector.StepEventGml + "\nmsl_loader_0();",
             LiveStubInjector.ManagerStepEntry, "trigger", boot, strg, ref seq));
         ops.Add(CompileTextOp(LiveStubInjector.StepEventGml,
             LiveStubInjector.ManagerStepEntry, "restore", boot, strg, ref seq));
-        ops.Add(CompileTextOp(gmlText, LiveStubInjector.LoaderSlot, "loader", boot, strg, ref seq));
+        ops.Add(CompileLoaderOp(gmlText, LiveStubInjector.LoaderSlot, boot, strg, ref seq));
         return ops;
     }
 
@@ -225,9 +243,16 @@ public static class HotPipeline
             Log.Warning("[live] loader compile mutated baseline: str {a}->{b}, var {c}->{d}（播种/模板漏名字=bug）",
                 strCount, boot.Strings.Count, varCount, boot.Variables.Count);
         var payload = RefsExtractor.Extract(code, boot, AssetRanges.Empty, new AssetKindResolver());
+        // LocalsCount 自设 = 1+distinct 局部（TypeInst=-7 的相异 Var）：裸 entry 编译出的
+        // LocalsCount=0 是谎（tw-shape [2d] 实证——「+1 for arguments」公式只在 AddCode
+        // 预建 LOCZ 的条目上生效）；目标条目（事件）的 boot 值 = 同公式 1+distinct，
+        // 两侧同式才能过 agent 的 ≤ 容量检查（trigger 1 ≤ Step 事件 boot 1 精确）
+        int distinctLocals = payload.Instructions
+            .Where(i => i.Inst == -7 && i.Var != null).Select(i => i.Var!).Distinct().Count();
         var op = new OpMsg
         {
             Seq = seq++, Kind = kind, Entry = entry, ExecuteOnce = kind is "trigger" or "restore",
+            LocalsCount = 1 + distinctLocals,
             Instructions = payload.Instructions, Variables = payload.Variables,
             Functions = payload.Functions,
         };
@@ -236,11 +261,84 @@ public static class HotPipeline
         return op;
     }
 
+    static int scratchSeq;
+
+    /// <summary>loader 载荷：`function &lt;scratch&gt;() { &lt;loader 文本&gt; }` 在全新 scratch 根上
+    /// 编译 → 取根 sems（完整 wrapper [B][body][exit][tail]）→ 尾部两处重写 scratch→真名 →
+    /// LocalsCount = scratch 子条目值（loader 体 _t 一个局部 = 1，与垫片 stub 子=1 匹配）。
+    /// isNewFunc 无去重——每次全新 scratch 名；根必须先入 Code 列表再编译（子插在
+    /// Code[IndexOf(root)+1]，不入列则子落列表头 = 地址腐化）；用毕移除 scratch 根+子
+    /// （boot.Code 复原；编译期追加的字符串/VARI/FUNC 为 append-only 留置，无害）。
+    /// scratch 名是全新的 → 编译必变异（计数触发线在此失真）——播种检查改为逐载荷字符串
+    /// boot 可解析（StrgIndex ≥ 0；比计数更精确：变异来自 scratch 名，播种缺口来自 loader 文本）。</summary>
+    static OpMsg CompileLoaderOp(string gmlText, string realName, UndertaleData boot,
+        Dictionary<string, int> strg, ref int seq)
+    {
+        string scratch = $"msl_scratch_{scratchSeq++}";
+        var root = new UndertaleCode { Name = boot.Strings.MakeString(scratch) };
+        boot.Code.Add(root);
+        root.ReplaceGML($"function {scratch}()\n{{\n{gmlText}\n}}", boot);
+        var child = root.ChildEntries.FirstOrDefault(c => c.Offset == 4);
+        var payload = RefsExtractor.Extract(root, boot, AssetRanges.Empty, new AssetKindResolver());
+        RewriteBindingTail(payload.Instructions,
+            "gml_Script_" + scratch, "gml_Script_" + realName, scratch, realName);
+        var op = new OpMsg
+        {
+            Seq = seq++, Kind = "loader", Entry = realName,
+            LocalsCount = (int)(child?.LocalsCount ?? root.LocalsCount),
+            Instructions = payload.Instructions, Variables = payload.Variables,
+            Functions = payload.Functions,
+        };
+        foreach (var s in payload.Strings)
+            op.Strings.Add(new StrRef { Content = s, StrgIndex = strg.GetValueOrDefault(s, -1) });
+        if (child != null) boot.Code.Remove(child);
+        boot.Code.Remove(root);
+        return op;
+    }
+
+    // 指令字形态常量（= MslLive.Agent.BcEncoder 同名值；MSL 侧不引 agent 程序集，
+    // RefsExtractor 同款风格——值本身就是 SemInstruction 线上契约）
+    const byte OpPush = 0xC0, OpPop = 0x45;
+    const byte TInt32 = 2, TVariable = 5;
+
+    /// <summary>绑定尾两处重写（fnref push.i 与 self-var pop.v.v）。绑定尾 = 末 9 指令
+    /// （编译器 isNewFunc 钉版形态：push.v fnref/conv/pushi.e -1/conv/call.v method argc=2/
+    /// dup/pushi.e -6/pop.v.v/popz.v）；体内同名引用不落此窗（递归调用是 OpCall、self 写
+    /// 是 Self inst——形态互异）。载荷尾部引用产品/scratch 名时 agent 侧不可解析——必须
+    /// 改写到 boot 在场的名字（槽名/真名）。名字对不上 = 无重写 → agent 拒绝（fail-closed）。</summary>
+    static void RewriteBindingTail(List<SemInstruction> insts, string oldFn, string newFn, string oldVar, string newVar)
+    {
+        foreach (var sem in insts.Skip(Math.Max(0, insts.Count - 9)))
+        {
+            if (sem.Kind == OpPush && sem.T1 == TInt32 && sem.Fn == oldFn)
+                sem.Fn = newFn;
+            else if (sem.Kind == OpPop && sem.T1 == TVariable && sem.Var == oldVar)
+                sem.Var = newVar;
+        }
+    }
+
+    /// <summary>脚本名裸化：剥 gml_Script_ / gml_GlobalScript_ 前缀（都不带则原样）。</summary>
+    static string BareScriptName(string name) => name switch
+    {
+        var n when n.StartsWith("gml_Script_") => n.Substring("gml_Script_".Length),
+        var n when n.StartsWith("gml_GlobalScript_") => n.Substring("gml_GlobalScript_".Length),
+        var n => n,
+    };
+
+    /// <summary>槽键规范化：一律 'gml_Script_' + 裸名 = 调用点 sem.Fn 的形态（S2②：脚本
+    /// 调用操作数 = 100000+子 codeId，FUNC 名 = 'gml_Script_X'）。分配（脚本自身 op）与
+    /// 查询（调用点重定向）共用同一键形态——产品根裸名（AddCode）与调用引用（gml_Script_
+    /// 前缀）不会各占一槽。</summary>
+    static string ScriptSlotKey(string name) => "gml_Script_" + BareScriptName(name);
+
     // ---- overlay 小 helper ----
 
-    /// <summary>product-only 函数名 → AllocateScript 槽名；boot 可解析（code 名 ∪ FUNC 名）的原样。</summary>
+    /// <summary>product-only 函数名 → 槽（键 = ScriptSlotKey 形态，与调用点重定向同一键）；
+    /// 列表值与 sems 重定向后同形（'gml_Script_' + 槽名）。boot 可解析（code 名 ∪ FUNC 名）
+    /// 的原样。</summary>
     static List<string> OverlayFunctions(IReadOnlyList<string> names, HashSet<string> bootFnNames, SessionState alloc)
-        => names.Select(n => bootFnNames.Contains(n) ? n : alloc.AllocateScript(n)).ToList();
+        => names.Select(n => bootFnNames.Contains(n) ? n
+            : "gml_Script_" + alloc.AllocateScript(ScriptSlotKey(n))).ToList();
 
     /// <summary>资产引用翻译：baseline 区间恒等；新增区间按 kind 分配运行时载体
     /// （Sprite→空白 / Object→壳 / Room→空房间；其余 → OverlayException 需重启）。</summary>
@@ -281,13 +379,6 @@ public static class HotPipeline
         var m = RoomCcName.Match(entryName);
         return m.Success ? m.Groups[1].Value : entryName;
     }
-
-    static string FunctionNameOf(string entryName) =>
-        entryName.StartsWith("gml_Script_") ? entryName.Substring("gml_Script_".Length) : entryName;
-
-    /// <summary>槽的 code entry 名就是 slot 名本身（msl_slot_N 由 Msl.AddFunction 按名创建，
-    /// 不是 gml_Script_ 前缀形态）——直接返回 slotName。</summary>
-    static string CodeNameForSlot(string origEntry, string slotName) => slotName;
 
     static int BootCount(UndertaleData boot, AssetKind kind) => kind switch
     {

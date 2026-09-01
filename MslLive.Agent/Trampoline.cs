@@ -2,13 +2,19 @@ using MslLive.Shared;
 
 namespace MslLive.Agent;
 
-/// <summary>把 dummy（"return 0;"）stub 换成 trampoline：[push.v argument0（仅 report）]
-/// + call.v 原生索引 + popz.v（丢返回值）+ return 0 收尾。
-/// 收尾形态由 ModShardLauncherTest.StubDummy_CompilesTo_PushiZeroRetV 钉版
-/// （pushi.e 0 + conv.i.v + ret.v = 12 字节）；安装前要求 dummy 活 buffer 与编码收尾
-/// <b>全等</b>——不等 = 编译器形态假设错了，fail-closed 不安装。
+/// <summary>把 dummy stub（#16a function 声明形态，68B wrapper）换成 trampoline。
+/// 新 buffer 布局 = [exit.i 4B @0][trampoline 体 @4]：[push.v argument0（仅 report）]
+/// + call.v 原生索引 + popz.v（丢返回值）+ return 0 收尾——apply 28B / report 36B。
+/// 根入口 0 = exit（安全 no-op：wrapper 的绑定尾只在 boot 装载期跑一次，swap 后根入口
+/// 不再有语义）；子入口 4 = StartOff 实证（S2④：调子 = 从偏移 4 进入执行子体）= 体本身。
+/// 安装前要求 dummy 活 buffer 是 68B 且头 20B（[B jump=5]+return-0 收尾+[exit.i T1=Int32]）
+/// 与编码全等——不等 = 编译器形态假设错了，fail-closed 不安装。形态真源 =
+/// ModShardLauncherTest.StubDummy_CompilesTo_WrapperWithPushiZeroRetVBody + tw-shape 探针
+/// （root len=68）。
 /// call 操作数经 Translator 走 Registry.IndexOf（原生注册后的真实槽位），并与
 /// NativeRegistration 捕获的索引交叉断言。旧 buffer 永不释放（S3 旧帧安全）。
+/// 根/子两条执行记录共享同一 buffer（S2④ 原文：两条执行记录 +0x18 同指 BUF）——
+/// 交换循环按 BufPtr 共享写两条记录（+0x08 长度、+0x18 指针，同值）。
 /// 幂等：进程内已安装的 stub 不重复安装（proof 重连重发不会把 trampoline 当 dummy 判死）。</summary>
 public static class Trampoline
 {
@@ -29,12 +35,24 @@ public static class Trampoline
         return ok;
     }
 
-    /// <summary>return-0 收尾的语义指令（也是 dummy 本体的完整内容）。</summary>
+    /// <summary>return-0 收尾的语义指令（dummy body 的完整内容）。</summary>
     internal static readonly SemInstruction[] ReturnZeroTail =
     {
         new() { Kind = BcEncoder.OpPushI, T1 = BcEncoder.TInt16, Low16 = 0 },          // pushi.e 0
         new() { Kind = BcEncoder.OpConv, T1 = BcEncoder.TInt32, T2 = BcEncoder.TVariable }, // conv.i.v
         new() { Kind = BcEncoder.OpRet, T1 = BcEncoder.TVariable },                    // ret.v
+    };
+
+    /// <summary>dummy wrapper 头 20B 的语义指令（[B jump=5]+收尾+[exit.i]）。
+    /// B +5 跳过 body+exit 直达绑定尾（tw-shape 探针钉版：root len=68，头 20B 之后是
+    /// 48B 绑定尾，操作数含运行时 codeId 不参与校验）。</summary>
+    internal static readonly SemInstruction[] WrapperHead =
+    {
+        new() { Kind = BcEncoder.OpB, Jump = 5 },
+        new() { Kind = BcEncoder.OpPushI, T1 = BcEncoder.TInt16, Low16 = 0 },
+        new() { Kind = BcEncoder.OpConv, T1 = BcEncoder.TInt32, T2 = BcEncoder.TVariable },
+        new() { Kind = BcEncoder.OpRet, T1 = BcEncoder.TVariable },
+        new() { Kind = BcEncoder.OpExit, T1 = BcEncoder.TInt32 },
     };
 
     static bool InstallOne(string name, int nativeIndex, bool withArg, Func<string, int>? registryIndexOf)
@@ -44,31 +62,37 @@ public static class Trampoline
         if (!NodeIndex.TryGet(name, out var node)) return Fail($"trampoline {name}: stub node not found");
 
         var translator = new Translator(new OpMsg { Entry = name }, registryIndexOf: registryIndexOf);
-        byte[] tail = BcEncoder.Encode(ReturnZeroTail.ToList(), translator);
+        byte[] head = BcEncoder.Encode(WrapperHead.ToList(), translator);
         byte[] dummy = Mem.ReadBytes(node.BufPtr, (int)node.BufLen);
-        if (!dummy.SequenceEqual(tail))
-            return Fail($"trampoline {name}: dummy live buffer ({dummy.Length}B) != return-0 shape ({tail.Length}B)");
+        if (dummy.Length != 68 || !dummy.AsSpan(0, head.Length).SequenceEqual(head))
+            return Fail($"trampoline {name}: dummy live buffer ({dummy.Length}B) != wrapper shape (68B, head {head.Length}B)");
 
-        var sems = new List<SemInstruction>();
+        var sems = new List<SemInstruction>
+        {
+            // 前置 exit：根入口 0 的安全 no-op；子入口 4 起才是 trampoline 体
+            new SemInstruction { Kind = BcEncoder.OpExit, T1 = BcEncoder.TInt32 },
+        };
         if (withArg)
             sems.Add(new SemInstruction
             {
                 Kind = BcEncoder.OpPush, T1 = BcEncoder.TVariable,
-                Inst = -15 /* InstanceType.Arg */, Var = "argument0", RefTop = 0xA0,
+                Inst = -9 /* InstanceType.Arg（vanilla [5] 实证：字 F7 FF 05 C0） */,
+                Var = "argument0", RefTop = 0xA0,
             });
         sems.Add(new SemInstruction { Kind = BcEncoder.OpCall, T1 = BcEncoder.TInt32, Low16 = (ushort)(withArg ? 1 : 0), Fn = name });
         sems.Add(new SemInstruction { Kind = BcEncoder.OpPopz, T1 = BcEncoder.TVariable });
         sems.AddRange(ReturnZeroTail);
         byte[] code = BcEncoder.Encode(sems, translator);
 
-        // Translator 经 Registry.IndexOf(name) 解析——与注册时捕获的索引必须一致
-        uint encodedIdx = BitConverter.ToUInt32(code, (withArg ? 8 : 0) + 4);
+        // Translator 经 Registry.IndexOf(name) 解析——与注册时捕获的索引必须一致。
+        // exit 前缀后 call 操作数位置：apply（无参）@8；report（多 8B 的 push.v argument0）@16
+        uint encodedIdx = BitConverter.ToUInt32(code, (withArg ? 8 : 0) + 8);
         if (encodedIdx != (uint)nativeIndex)
             return Fail($"trampoline {name}: encoded call target {encodedIdx} != registered native {nativeIndex}");
 
         ulong newBuf = Mem.AllocRW(code);
         if (newBuf == 0) return Fail($"trampoline {name}: VirtualAlloc failed");
-        // 共享旧 buffer 的全部执行记录一起换（stub 无子别名，正常只命中一条）
+        // 共享旧 buffer 的全部执行记录一起换（S2④：根+子双记录共享 BufPtr——两条都写）
         foreach (var n in NodeIndex.All.Where(n => n.BufPtr == node.BufPtr))
         {
             Mem.WriteU32(n.Record + 0x08, (uint)code.Length);

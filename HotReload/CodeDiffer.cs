@@ -4,12 +4,17 @@ using UndertaleModLib.Models;
 
 namespace ModShardLauncher.HotReload;
 
-public sealed record ChangedEntry(string Name, UndertaleCode Baseline, UndertaleCode Product);
+public sealed record ChangedEntry(string Name, UndertaleCode? Baseline, UndertaleCode Product);
 
 public static class CodeDiffer
 {
-    /// <summary>按名字配对的 entry 级 diff。baseline-only / product-only entry 不在本 spike 范围
-    ///（v1 热更只替换既有 entry；纯新增 entry 属主实现的槽位池机制，CLI 侧另行计数报告）。</summary>
+    /// <summary>按名字配对的 entry 级 diff。
+    /// 两遍：① baseline∩product 且指令有差 → 变更条目；② product-only → 新增条目
+    /// （Baseline=null；BuildSwapOp 槽/壳/房间路由的输入——计划 2709 行预期「新脚本自身
+    /// entry 也会出现在 changed」，旧版只遍历 baseline 侧使槽路由全是死代码，fix-loop #16 补）。
+    /// 子条目（ParentEntry != null）两遍都跳过：子是父 blob 的组成部分（S2④ 父子共享
+    /// buffer，SwapCode 粒度 = 父 buffer 整块）——子 op 会在 agent 侧被 StartOff≠0 拒 →
+    /// 整批失败（fix-loop #16 bug #3）。</summary>
     public static List<ChangedEntry> Diff(UndertaleData baseline, UndertaleData product)
     {
         var changed = new List<ChangedEntry>();
@@ -17,11 +22,20 @@ public static class CodeDiffer
         foreach (var p in product.Code)
             if (!productByName.ContainsKey(p.Name.Content))
                 productByName.Add(p.Name.Content, p);
+        var baselineNames = new HashSet<string>();
         foreach (var b in baseline.Code)
         {
+            baselineNames.Add(b.Name.Content);
+            if (b.ParentEntry != null) continue;   // 子条目：根 op 已覆盖整 blob
             if (!productByName.TryGetValue(b.Name.Content, out var p)) continue;
             if (!SameInstructions(b, p))
                 changed.Add(new ChangedEntry(b.Name.Content, b, p));
+        }
+        foreach (var p in product.Code)
+        {
+            if (p.ParentEntry != null) continue;   // 同上：product 侧子条目不入列
+            if (baselineNames.Contains(p.Name.Content)) continue;
+            changed.Add(new ChangedEntry(p.Name.Content, null, p));
         }
         return changed;
     }

@@ -24,12 +24,14 @@ public class VarIdSimulatorTests
         var ids = VarIdSimulator.Simulate(data);
 
         // ① 局部变量占装载序空间且按 .localvar 声明序连续（实测 100646..100649，
-        //    scr_unitRenderDrawSprite 的 local _borderLeft.._borderBottom）
-        Assert.True(ids.ContainsKey("i:_borderLeft"), "locals must consume load-order ids (S2 实测)");
-        int l = ids["i:_borderLeft"];
-        Assert.Equal(l + 1, ids["i:_borderTop"]);
-        Assert.Equal(l + 2, ids["i:_borderRight"]);
-        Assert.Equal(l + 3, ids["i:_borderBottom"]);
+        //    scr_unitRenderDrawSprite 的 local _borderLeft.._borderBottom）。
+        //    #16b：局部键域 = "l:"（[V] 实证 vanilla 845 个 Local+非 Local VARI 并存，
+        //    如 target[Self,Global,Local]——与实例变量同 "i:" 键会串 id）
+        Assert.True(ids.ContainsKey("l:_borderLeft"), "locals must consume load-order ids (S2 实测)");
+        int l = ids["l:_borderLeft"];
+        Assert.Equal(l + 1, ids["l:_borderTop"]);
+        Assert.Equal(l + 2, ids["l:_borderRight"]);
+        Assert.Equal(l + 3, ids["l:_borderBottom"]);
 
         // ② 实例变量族按首遇序连续（实测 stScaleY..stX = 100312..100315）
         int s = ids["i:stScaleY"];
@@ -52,7 +54,7 @@ public class VarIdSimulatorTests
         Assert.DoesNotContain(ids.Keys, k => k.EndsWith(":argument0"));
         Assert.DoesNotContain(ids.Keys, k => k.EndsWith(":x"));
 
-        // ⑥ 键前缀形态
-        Assert.All(ids.Keys, k => Assert.Matches(@"^[ig]:", k));
+        // ⑥ 键前缀形态（#16b：Local → "l:"，与 Translator/VarCalibrator 键域同源）
+        Assert.All(ids.Keys, k => Assert.Matches(@"^[igl]:", k));
     }
 }

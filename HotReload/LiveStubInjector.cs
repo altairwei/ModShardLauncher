@@ -36,11 +36,11 @@ public static class LiveStubInjector
         if (!ReferenceEquals(data, ModLoader.Data))
             throw new InvalidOperationException("LiveStubInjector 要求 data == ModLoader.Data（Msl.* 原语的全局绑定）");
 
-        EnsureFunction(data, ApplyFn);
-        EnsureFunction(data, ReportFn);
-        EnsureFunction(data, LoaderSlot);
+        EnsureFunction(data, ApplyFn, padLocal: false);
+        EnsureFunction(data, ReportFn, padLocal: false);
+        EnsureFunction(data, LoaderSlot, padLocal: true);
         for (int i = 0; i < quotas.ScriptSlots; i++)
-            EnsureFunction(data, $"msl_slot_{i}");
+            EnsureFunction(data, $"msl_slot_{i}", padLocal: true);
 
         // loader 路径拼接用的唯二字符串字面量（loader GML 只允许 boot 字符串，Task 5）
         EnsureString(data, "mods/_live/res/");
@@ -56,8 +56,9 @@ public static class LiveStubInjector
         {
             string parent = quotas.ShellParents[i % quotas.ShellParents.Length];
             var shell = EnsureShell(data, $"o_msl_shell_{i}", parent);
+            // 垫 2 var 余量（boot LocalsCount=3）：payload=product 事件代码原样，可有 ≤2 局部
             foreach (var (type, sub) in ShellEventMenu)
-                EnsureEvent(shell, type, sub, "return 0;");
+                EnsureEvent(shell, type, sub, "var _x = 0;\nvar _y = 0;\nreturn 0;");
         }
 
         for (int i = 0; i < quotas.EmptyRooms; i++)
@@ -69,19 +70,28 @@ public static class LiveStubInjector
             quotas.ScriptSlots, quotas.ShellObjects, quotas.EmptyRooms);
     }
 
-    static void EnsureFunction(UndertaleData data, string name)
+    static void EnsureFunction(UndertaleData data, string name, bool padLocal)
     {
         var code = data.Code.FirstOrDefault(x => x.Name.Content == name);
+        // 垫片矩阵（#16b，LocalsCount 语义 = 编译器「+1 for arguments」公式，子条目取
+        // patch.LocalsCount=distinct）：loader/slot 垫 var _t（子=1：loader 载荷 _t 精确
+        // 匹配、shell-config-only 0≤1）；apply/report 不垫（trampoline 0 局部 = 0≤0 精确）。
+        string body = padLocal ? $"var _t = 0;\nreturn 0;" : "return 0;";
         if (code == null)
-            code = Msl.AddFunction("return 0;", name);
-        // SCPT + GlobalInit 注册（Task 16 真机抓到的缺漏）：VM 在 load 时按名解析 call.i 的
-        // 函数表只来自 SCPT 块——光有 CODE+FUNC 条目，游戏启动即报 "Unable to find function <name>"。
-        // 裸名合法：vanilla 有 3276 条裸名 SCPT 先例（scr_blank 等指向 gml_GlobalScript_*）。
-        // 两半各自幂等：在已打过（无注册）的 data.win 上重编可自愈。
-        if (data.Scripts.All(s => s.Name.Content != name))
-            data.Scripts.Add(new UndertaleScript { Name = code.Name, Code = code });
-        if (data.GlobalInitScripts.All(g => g.Code != code))
-            data.GlobalInitScripts.Add(new UndertaleGlobalInit { Code = code });
+        {
+            // TheWitcher 形状（fix-loop #16 根因修复，形状真源 = 真机可用的 TW 产物）：
+            // function 声明走编译器 isNewFunc 路径，自动生成 gml_Script_ 子条目（Offset=4，
+            // 紧跟根）+ prefixed SCPT→子 + prefixed Functions + 裸名 VARI + 根内绑定尾——
+            // 运行时 call fn='gml_Script_X'（Functions 名直呼）可解析。裸语句（"return 0;"）
+            // 不走该路径，五索引残缺 → "call to non-existent script"（真机 #16 实测）。
+            // 不注册裸名 SCPT / GlobalInit：TW 的脚本根不在 GlobalInit。
+            Msl.AddFunction($"function {name}() {{\n{body}\n}}", name);
+            return;
+        }
+        // 自愈（34555ad 及更早的历史产物）：裸根无子 → 重编译为 function 声明形态。
+        if (data.Code.All(x => x.Name.Content != "gml_Script_" + name))
+            code.ReplaceGML($"function {name}() {{\n{body}\n}}", ModLoader.Data);
+        // 已是新形态 → 幂等无事。
     }
 
     static void EnsureString(UndertaleData data, string content)
@@ -104,8 +114,9 @@ public static class LiveStubInjector
     {
         if (data.Rooms.Any(r => r.Name.Content == name)) return;
         var room = Msl.AddRoom(name);
-        // 空 creation code：新房间的 SwapCode 目标（spec §6.4 房间行）
-        var cc = Msl.AddCode("return 0;", $"gml_RoomCC_{name}_0");
+        // 空 creation code：新房间的 SwapCode 目标（spec §6.4 房间行）。
+        // 垫 2 var 余量（boot LocalsCount=3）：payload=product 房间 CC 代码原样，可有 ≤2 局部
+        var cc = Msl.AddCode("var _x = 0;\nvar _y = 0;\nreturn 0;", $"gml_RoomCC_{name}_0");
         room.CreationCodeId = cc;
     }
 

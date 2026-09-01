@@ -14,10 +14,14 @@ public static class LoaderGen
 {
     /// <summary>精灵热更三段式（spec §7.3，StoneShard 原生组合：add→assign→delete）。
     /// 新精灵与改精灵同一形态——新精灵的 blank 索引处已被 GameStart 填了 _blank.png，
-    /// assign 直接覆盖内容，索引不变。</summary>
+    /// assign 直接覆盖内容，索引不变。
+    /// 路径拼接用 <b>裸数字</b>而非 string(字面量)：UTMT 编译器会把
+    /// "a" + string(字面量) + "b" 常量折叠成单个非 boot 整路径字面量（fix-loop #16
+    /// fold-probe A 实证 → agent 非 boot 字符串拒绝）；"a" + 数字 + "b" 不折叠
+    /// （fold-probe D：两个种子串 + 运行时 add，且无 string() 调用、局部数仅 _t）。</summary>
     public static string SpriteLoader(SpriteChange c, StripInfo strip, int runtimeIndex) =>
         $"// sprite {c.Name} -> {runtimeIndex}\n" +
-        $"var _t = sprite_add(\"mods/_live/res/\" + string({runtimeIndex}) + \".png\", {strip.Frames}, false, false, {strip.OriginX}, {strip.OriginY});\n" +
+        $"var _t = sprite_add(\"mods/_live/res/\" + {runtimeIndex} + \".png\", {strip.Frames}, false, false, {strip.OriginX}, {strip.OriginY});\n" +
         $"sprite_assign({runtimeIndex}, _t);\n" +
         $"sprite_delete(_t);\n";
 

@@ -10,9 +10,12 @@ namespace MslLive.Agent;
 /// → Reject（product-only 新变量，取舍清单）。
 /// 内置变量（exe 固定 smallId 表）优先于符号表——名字判据与 runner 语义同源（Task 11 Step 4/5）。
 ///
-/// 键域与 VarIdSimulator 同源：指令 TypeInst == -5(Global) → "g:"，其余 → "i:"；
-/// 主键未命中回落另一键域（[stacktop] self.X 的 TypeInst=0 实测指向全局符号，
-/// 靠回落命中 "g:"——S2 黄金 buffer 的 pop.v.v [stacktop]self.scr_unitRenderDrawSprite）。
+/// 键域与 VarIdSimulator 同源：指令 TypeInst == -5(Global) → "g:"，-7(Local) → "l:"，
+/// 其余 → "i:"。局部独立成域（fix-loop #16 [V] 实证：vanilla 845 个 Local+非 Local VARI
+/// 并存——key/state/i/j/target[Self,Global,Local]…，-7 落 "i:" 与实例变量同键会串 id）。
+/// 主键未命中回落另一键域（i↔g 互通：[stacktop] self.X 的 TypeInst=0 实测指向全局符号，
+/// 靠回落命中 "g:"——S2 黄金 buffer 的 pop.v.v [stacktop]self.scr_unitRenderDrawSprite）；
+/// <b>"l:" 不回落</b>——回落会静默命中 Self 同名符号 = 错 id，宁拒（fail-closed）。
 /// 函数：先注册表（内置，原始索引）后 NodeIndex（脚本，100000+codeId）——名字空间不重叠（S2 ②）。</summary>
 public sealed class Translator : IOperandResolver
 {
@@ -38,8 +41,9 @@ public sealed class Translator : IOperandResolver
         this.scriptCodeId = scriptCodeId ?? (name => NodeIndex.TryGet(name, out var n) ? (int?)n.CodeId : null);
     }
 
-    /// <summary>VarsMsg 键域选择（与 VarIdSimulator 的 "i:"/"g:" 前缀规则同源）。</summary>
-    internal static string KeyFor(short inst, string name) => (inst == -5 ? "g:" : "i:") + name;
+    /// <summary>VarsMsg 键域选择（与 VarIdSimulator 的 "i:"/"g:"/"l:" 前缀规则同源）。</summary>
+    internal static string KeyFor(short inst, string name) =>
+        (inst == -5 ? "g:" : inst == -7 ? "l:" : "i:") + name;
 
     public uint ResolveVar(string name, short instType)
     {
@@ -48,10 +52,12 @@ public sealed class Translator : IOperandResolver
         if (BuiltinVars.TryGetId(name, out int small)) return (uint)small;
 
         string key = KeyFor(instType, name);
-        string alt = key[0] == 'i' ? "g:" + name : "i:" + name;
-        if (calibrated.TryGetValue(key, out int id) || calibrated.TryGetValue(alt, out id))
+        // "l:" 精确匹配不回落（845 实证碰撞：回落命中 Self 同名符号 = 静默错 id）；
+        // i↔g 互回落保留（[stacktop]self.X 实证需要）
+        string? alt = key[0] == 'l' ? null : key[0] == 'i' ? "g:" + name : "i:" + name;
+        if (calibrated.TryGetValue(key, out int id) || (alt != null && calibrated.TryGetValue(alt, out id)))
             return (uint)(100000 + id);
-        if (vars.TryGetValue(key, out id) || vars.TryGetValue(alt, out id))
+        if (vars.TryGetValue(key, out id) || (alt != null && vars.TryGetValue(alt, out id)))
         {
             // 模拟值兜底：Task 11 已证有残余偏移——用可以，但必须留痕
             if (simulatedLogged.Add(key))

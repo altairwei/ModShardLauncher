@@ -71,6 +71,29 @@ public class TranslatorTests
     }
 
     [Fact]
+    public void Var_LocalScope_UsesLKey()
+    {
+        // TypeInst=-7 → "l:" 键域（[V] 实证：vanilla 845 个 Local+非 Local VARI 并存，
+        // 如 target[Self,Global,Local]——分域才不串 id。旧代码落 "i:" 与实例变量同键）
+        var vars = new Dictionary<string, int> { ["l:key"] = 55, ["i:key"] = 999 };
+        var t = new Translator(new OpMsg(), vars: vars, calibrated: new Dictionary<string, int>(),
+            registryIndexOf: _ => -1, scriptCodeId: _ => null);
+        byte[] b = EncodeOne(PushVar("key", inst: -7), t);
+        Assert.Equal(0xA00186D7u, BitConverter.ToUInt32(b, 4));   // 100000+55 = 100055，不是 i: 的 999
+    }
+
+    [Fact]
+    public void Var_LocalScope_Miss_DoesNotFallBackToI_Reject()
+    {
+        // "l:" 未命中不得回落 "i:"（会静默命中 Self 同名符号 = 错 id）；fail-closed。
+        // i↔g 回落保留（[stacktop]self.X 实证需要，见上）。
+        var vars = new Dictionary<string, int> { ["i:key"] = 999 };
+        var t = new Translator(new OpMsg(), vars: vars, calibrated: new Dictionary<string, int>(),
+            registryIndexOf: _ => -1, scriptCodeId: _ => null);
+        Assert.Throws<TranslationRejectException>(() => EncodeOne(PushVar("key", inst: -7), t));
+    }
+
+    [Fact]
     public void Var_Unmapped_Reject()
     {
         var ex = Assert.Throws<TranslationRejectException>(() => EncodeOne(PushVar("product_only_new_var"), Make()));

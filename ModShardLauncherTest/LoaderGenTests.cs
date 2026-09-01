@@ -46,7 +46,9 @@ public class LoaderGenTests
         var c = new SpriteChange { Name = "s_x" };
         var strip = new StripInfo { RelPath = "mods/_live/res/17248.png", Frames = 3, OriginX = 4, OriginY = 5 };
         string gml = LoaderGen.SpriteLoader(c, strip, 17248);
-        Assert.Contains("sprite_add(\"mods/_live/res/\" + string(17248) + \".png\", 3, false, false, 4, 5)", gml);
+        // 路径拼接用裸数字而非 string(字面量)（fix-loop #16 fold-probe：string(字面量) 形态
+        // 被编译器常量折叠成非 boot 整路径字面量 → agent 拒；裸数字不折叠且局部数仍 1）
+        Assert.Contains("sprite_add(\"mods/_live/res/\" + 17248 + \".png\", 3, false, false, 4, 5)", gml);
         Assert.Contains("sprite_assign(17248, _t);", gml);
         Assert.Contains("sprite_delete(_t);", gml);
     }

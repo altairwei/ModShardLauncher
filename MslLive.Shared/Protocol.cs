@@ -104,7 +104,7 @@ public sealed class BlanksMsg
 public sealed class VarsMsg
 {
     public int Protocol { get; set; } = 1;
-    public Dictionary<string, int> Ids { get; set; } = new();   // "i:"+名 / "g:"+名 → loadOrderId
+    public Dictionary<string, int> Ids { get; set; } = new();   // "i:"+名 / "g:"+名 / "l:"+名（局部——fix-loop #16 [V]：845 实证 Local 与实例并存，分域防串 id）→ loadOrderId
 }
 
 public sealed class ProofMsg

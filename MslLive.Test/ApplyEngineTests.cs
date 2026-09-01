@@ -222,4 +222,53 @@ public class ApplyEngineTests : IDisposable
         Assert.Equal("resolve", r.Stage);
         Assert.Contains("alias child entry", r.Reason);
     }
+
+    /// <summary>#16b：≤ 容量语义——载荷局部数 < 帧容量（用户删局部）是安全的
+    /// （帧偏大无害），旧相等语义会误拒。</summary>
+    [Fact]
+    public void Enqueue_PayloadFewerLocalsThanFrame_Passes()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 2);
+        NodeIndex.Build();
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 1;
+        Assert.Null(ApplyEngine.Enqueue(Batch(op)));
+        ApplyEngine.Pump();
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+    }
+
+    /// <summary>#16b：frameOwner = 最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
+    /// 子体——子才是帧主），不是根。载荷 5 == 根 5（旧相等语义放行）但 > 子 1 → 必须拒。</summary>
+    [Fact]
+    public void Enqueue_PayloadFitsParentButExceedsChildFrame_Rejected()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 5);
+        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", locals: 1, startOff: 4);
+        NodeIndex.Build();
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 5;
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("locals mismatch", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));      // 未换
+    }
+
+    /// <summary>#16b：交换面完整性——全部别名（含子）的 node+0xA0 与各自 record+0x0C
+    /// 必须镜像一致；容量检查通过（1 ≤ 子 1）但子镜像破裂 → 拒。</summary>
+    [Fact]
+    public void Enqueue_AliasMirrorMismatch_Rejected()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 1);
+        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", locals: 1, startOff: 4);
+        W32(AliasRecord + 0x0C, 3);   // 子记录镜像破裂（node+0xA0=1）
+        NodeIndex.Build();
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 1;
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("locals mismatch", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));
+    }
 }

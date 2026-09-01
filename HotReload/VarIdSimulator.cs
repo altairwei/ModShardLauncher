@@ -17,8 +17,10 @@ public static class VarIdSimulator
     ///   相异名字全在表内、被分配的 19963 个名字零碰撞——名字判据与旧启发式
     ///   （VarID==-6 / TypeInst==-15）在 vanilla 上完全等价，且名字判据更贴近 runner 语义
     ///   （runner 按名字先查内置表）。旧启发式废弃。
-    /// - 键域 = 目标 VARI 条目 InstanceType == -5 → "g:"，其余 → "i:"。i/g 共享同一计数器
-    ///   （实测邻接：spr=1215、waterDrawState=1216、scr_unitRenderDrawSprite=1217）。
+    /// - 键域 = 目标 VARI 条目 InstanceType == -5 → "g:"，-7(Local) → "l:"，其余 → "i:"。
+    ///   i/g 共享同一计数器（实测邻接：spr=1215、waterDrawState=1216、scr_unitRenderDrawSprite=1217）。
+    ///   局部独立成 "l:"（fix-loop #16 [V] 实证：vanilla 845 个 Local+非 Local VARI 并存
+    ///   ——target[Self,Global,Local] 族；与 "i:" 同键会串 id。与 Translator.KeyFor 同源）。
     ///
     /// <para><b>已知偏差（Task 11 再调查后的诚实结论）：</b>绝对值系统性偏移仍存在
     /// （早窗 -3、(_color,_borderLeft) 窗 +1，净 -2 @646..649 锚点）。Task 11 用 exe 表
@@ -45,7 +47,9 @@ public static class VarIdSimulator
             if (!InstructionVars.TryGet(instr, out string? name, out _, out var target)) continue;
             if (MslLive.Shared.BuiltinVars.Map.ContainsKey(name!))
                 continue;   // 内置：exe 固定 smallId 表（Task 11 实测 218 条），不占装载序 id 空间
-            string key = ((short)target!.InstanceType == (short)UndertaleInstruction.InstanceType.Global ? "g:" : "i:") + name;
+            string key = ((short)target!.InstanceType == (short)UndertaleInstruction.InstanceType.Global ? "g:"
+                : (short)target!.InstanceType == (short)UndertaleInstruction.InstanceType.Local ? "l:"
+                : "i:") + name;
             if (!ids.ContainsKey(key)) ids[key] = next++;
         }
         return ids;

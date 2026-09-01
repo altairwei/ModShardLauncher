@@ -35,14 +35,30 @@ public class LiveStubInjectorTests : IDisposable
         foreach (var n in new[] { "msl_live_apply", "msl_live_report", "msl_loader_0" })
             Assert.Contains(data.Code, c => c.Name.Content == n);
 
-        // SCPT + GlobalInit 注册（Task 16 真机缺漏修复）：无 SCPT 条目 = VM load 时
-        // "Unable to find function"。全部 stub（apply/report/loader/64 slots）都必须注册。
-        foreach (var n in new[] { "msl_live_apply", "msl_live_report", "msl_loader_0" }
-                 .Concat(Enumerable.Range(0, q.ScriptSlots).Select(i => $"msl_slot_{i}")))
+        // TheWitcher 形状（fix-loop #16 根因修复，形状真源 = 真机可用的 TW 产物 forensics）：
+        // 每个 stub 脚本 = 根 Code + gml_Script_ 子条目(Offset=4) + prefixed SCPT→子 + prefixed
+        // Functions + 裸名 VARI。根因：裸语句 GML（"return 0;"）不走编译器 isNewFunc 路径，
+        // 五索引残缺（无子/SCPT 指根/无 VARI）→ 运行时 call fn 无法解析 → "call to
+        // non-existent script"。TW 的脚本根不在 GlobalInit——调用一律走 call fn='gml_Script_X'
+        // （Functions 名直呼），34555ad 的手动 SCPT+GlobalInit 注册已删。
+        var stubNames = new[] { "msl_live_apply", "msl_live_report", "msl_loader_0" }
+            .Concat(Enumerable.Range(0, q.ScriptSlots).Select(i => $"msl_slot_{i}"));
+        foreach (var n in stubNames)
         {
-            var code = data.Code.First(c => c.Name.Content == n);
-            Assert.Contains(data.Scripts, s => s.Name.Content == n && s.Code == code);
-            Assert.Contains(data.GlobalInitScripts, g => g.Code == code);
+            var root = data.Code.First(c => c.Name.Content == n);
+            var child = data.Code.Single(c => c.Name.Content == "gml_Script_" + n);
+            Assert.Equal(root, child.ParentEntry);
+            Assert.Contains(child, root.ChildEntries);
+            Assert.Equal(4u, child.Offset);
+            // 子紧跟根（写入器全局游标编址：child 必须紧邻其父，否则 blob 地址被劫持——#4）
+            Assert.Equal(data.Code.IndexOf(root) + 1, data.Code.IndexOf(child));
+            var scpt = data.Scripts.Single(s => s.Name.Content == "gml_Script_" + n);
+            Assert.Equal(child, scpt.Code);
+            Assert.Contains(data.Functions, f => f.Name.Content == "gml_Script_" + n);
+            Assert.Contains(data.Variables, v => v.Name.Content == n);
+            // 裸名 SCPT 不存在；根不进 GlobalInit（TW 形状）
+            Assert.DoesNotContain(data.Scripts, s => s.Name.Content == n);
+            Assert.DoesNotContain(data.GlobalInitScripts, g => g.Code == root);
         }
 
         var manager = data.GameObjects.First(o => o.Name.Content == "o_msl_live");
@@ -71,34 +87,71 @@ public class LiveStubInjectorTests : IDisposable
             Assert.Contains(data.Rooms, r => r.Name.Content == $"r_msl_empty_{i}");
         Assert.True(q.RoomBaseIndex > 0);
 
-        // step 事件的 msl_live_apply 调用必须真的解析到同名函数（编译期绑定检查）
+        // step 事件的 msl_live_apply 调用必须解析到 gml_Script_ 子函数（编译期绑定检查；
+        // TW 宿主同款形态：Call fn='gml_Script_X'——KnownSubFunctions 解析）
         var stepCode = data.Code.First(c => c.Name.Content == LiveStubInjector.ManagerStepEntry);
         Assert.Contains(stepCode.Instructions,
-            i => i.Function?.Target?.Name?.Content == "msl_live_apply");
+            i => i.Function?.Target?.Name?.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
     }
 
-    /// <summary>dummy stub（"return 0;"）的编译形态钉版：Task 14 的 Trampoline 收尾字节校验
-    /// 以它为基准（pushi.e 0 + conv.i.v + ret.v = 12 字节，探针实测）。编译器输出若变，本测试红 =
-    /// MslLive.Test 的 Trampoline fixture 同步过期。</summary>
+    /// <summary>dummy stub（"function X() { return 0; }"）的编译形态钉版：Task 14 的
+    /// Trampoline 收尾字节校验以它为基准。wrapper 形态 = [B 跳过 body 到绑定尾][body][绑定尾]，
+    /// 子条目 Offset=4 → child 从 body 第一条执行。body = pushi.e 0 + conv.i.v + ret.v
+    /// （12 字节，探针实测）。编译器输出若变，本测试红 = MslLive.Test 的 Trampoline fixture
+    /// 同步过期。</summary>
     [Fact]
-    public void StubDummy_CompilesTo_PushiZeroRetV()
+    public void StubDummy_CompilesTo_WrapperWithPushiZeroRetVBody()
     {
         var data = Load();
         LiveStubInjector.Inject(data, new LiveQuotas());
-        var code = data.Code.First(c => c.Name.Content == LiveStubInjector.ApplyFn);
-        // 实测形态（vendored dll 编译器，探针读出）：pushi.e 0 → conv.i.v → ret.v
-        // = 12 字节 00 00 0F 84 | 00 00 52 07 | 00 00 05 9C
-        Assert.Equal(3, code.Instructions.Count);
-        var push = code.Instructions[0];
+        var root = data.Code.First(c => c.Name.Content == LiveStubInjector.ApplyFn);
+        // wrapper 首 instruction = B（root 执行时跳过 body 直达绑定尾；child @+4 落在 body 头）
+        Assert.Equal(UndertaleInstruction.Opcode.B, root.Instructions[0].Kind);
+        // body（child 入口，blob +4）= pushi.e 0 → conv.i.v → ret.v（TW msl_print 同构）
+        var push = root.Instructions[1];
         Assert.Equal(UndertaleInstruction.Opcode.PushI, push.Kind);
         Assert.Equal((short)0, Assert.IsType<short>(push.Value));
-        var conv = code.Instructions[1];
+        var conv = root.Instructions[2];
         Assert.Equal(UndertaleInstruction.Opcode.Conv, conv.Kind);
         Assert.Equal(UndertaleInstruction.DataType.Int32, conv.Type1);
         Assert.Equal(UndertaleInstruction.DataType.Variable, conv.Type2);
-        var ret = code.Instructions[2];
+        var ret = root.Instructions[3];
         Assert.Equal(UndertaleInstruction.Opcode.Ret, ret.Kind);
         Assert.Equal(UndertaleInstruction.DataType.Variable, ret.Type1);
+        // 绑定尾引用 gml_Script_ 子函数（push.i fnref —— TW msl_print 绑定尾同款）
+        Assert.Contains(root.Instructions, i =>
+            i.Value is UndertaleInstruction.Reference<UndertaleFunction> rf &&
+            rf.Target?.Name?.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
+        var child = data.Code.Single(c => c.Name.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
+        Assert.Equal(4u, child.Offset);
+    }
+
+    /// <summary>垫片矩阵钉版（#16b，LocalsCount 语义 = AssemblyWriter「+1 for arguments」
+    /// 公式，仅 LOCZ 存在时更新——Msl.AddCode 预建）：loader/slot stub 垫 `var _t = 0;`
+    /// （子=1：loader 载荷 _t 精确匹配、shell-config-only 0≤1）；apply/report 不垫（trampoline
+    /// 0 局部=0≤0 精确）；壳事件与 RoomCC 垫 2 var 余量（boot=3：payload=product 事件代码
+    /// 原样可有 ≤2 局部）；Step 事件不垫（boot=1：trigger 载荷 1+0=1 精确）。</summary>
+    [Fact]
+    public void Inject_PadMatrix_ChildLocalsCountsPinned()
+    {
+        var data = Load();
+        var q = new LiveQuotas();
+        LiveStubInjector.Inject(data, q);
+
+        // loader/slot：垫 var _t → 子 LocalsCount=1（tw-shape [2c] 垫片探针实证）
+        foreach (var n in new[] { "msl_loader_0" }.Concat(Enumerable.Range(0, q.ScriptSlots).Select(i => $"msl_slot_{i}")))
+            Assert.Equal(1u, data.Code.Single(c => c.Name.Content == "gml_Script_" + n).LocalsCount);
+        // apply/report：不垫 → 子 LocalsCount=0（tw-shape [2] 实证）
+        foreach (var n in new[] { "msl_live_apply", "msl_live_report" })
+            Assert.Equal(0u, data.Code.Single(c => c.Name.Content == "gml_Script_" + n).LocalsCount);
+        // Step 事件：不垫 → LocalsCount=1（AddCode 公式 0+1；trigger 载荷 1≤1）
+        Assert.Equal(1u, data.Code.First(c => c.Name.Content == LiveStubInjector.ManagerStepEntry).LocalsCount);
+        // 壳事件：垫 2 var → LocalsCount=3（0 局部事件公式 2+1）
+        var shell = data.GameObjects.First(o => o.Name.Content == "o_msl_shell_0");
+        Assert.All(shell.Events.SelectMany(e => e),
+            ev => Assert.Equal(3u, ev.Actions[0].CodeId.LocalsCount));
+        // RoomCC：垫 2 var → LocalsCount=3
+        Assert.Equal(3u, data.Code.First(c => c.Name.Content == "gml_RoomCC_r_msl_empty_0_0").LocalsCount);
     }
 
     [Fact]
@@ -117,18 +170,24 @@ public class LiveStubInjectorTests : IDisposable
         Assert.Equal(initCount, data.GlobalInitScripts.Count);
     }
 
-    /// <summary>自愈路径：在「有 stub 但无 SCPT/GlobalInit 注册」的历史产物上重跑 Inject，
-    /// 注册必须补齐且 code 不重复（Task 16 之前编译的 data.win 重编场景）。</summary>
+    /// <summary>自愈路径：在「裸根无子条目」的历史产物（34555ad 及更早编译的 data.win：
+    /// 裸根 + 裸 SCPT + GlobalInit 注册）上重跑 Inject，必须重编译为 function 声明形态
+    /// （TheWitcher 形状）且根不重复。</summary>
     [Fact]
-    public void Inject_HealsLegacyStubWithoutRegistration()
+    public void Inject_HealsLegacyBareRootIntoWrapperShape()
     {
         var data = Load();
-        Msl.AddFunction("return 0;", LiveStubInjector.ApplyFn);   // 模拟旧产物：只有 code entry
+        Msl.AddFunction("return 0;", LiveStubInjector.ApplyFn);   // 模拟旧产物：只有裸 code entry
         LiveStubInjector.Inject(data, new LiveQuotas());
-        Assert.Single(data.Code.Where(c => c.Name.Content == LiveStubInjector.ApplyFn));   // 不重复
-        var code = data.Code.First(c => c.Name.Content == LiveStubInjector.ApplyFn);
-        Assert.Contains(data.Scripts, s => s.Name.Content == LiveStubInjector.ApplyFn && s.Code == code);
-        Assert.Contains(data.GlobalInitScripts, g => g.Code == code);
+        Assert.Single(data.Code.Where(c => c.Name.Content == LiveStubInjector.ApplyFn));   // 根不重复
+        var root = data.Code.First(c => c.Name.Content == LiveStubInjector.ApplyFn);
+        var child = data.Code.Single(c => c.Name.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
+        Assert.Equal(root, child.ParentEntry);
+        Assert.Equal(4u, child.Offset);
+        var scpt = data.Scripts.Single(s => s.Name.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
+        Assert.Equal(child, scpt.Code);
+        // 34555ad 形态的 GlobalInit 注册不再补（TW 根不在 GlobalInit）
+        Assert.DoesNotContain(data.GlobalInitScripts, g => g.Code == root);
     }
 
     /// <summary>回归（Task 16 fix-loop #4，真机 Code Error 根因）：GMS2.3 的 child 条目
@@ -174,7 +233,17 @@ public class LiveStubInjectorTests : IDisposable
             string.Join("; ", stolen.Take(5).Select(c =>
                 $"{c.Name.Content}: len {baseline[c.Name.Content].len}->{c.Length}, " +
                 $"parent '{baseline[c.Name.Content].parent}'->'{c.ParentEntry?.Name.Content}'")));
-        Assert.All(reloaded.Code.Where(c => c.Name.Content.StartsWith("msl_")),
-            c => Assert.Empty(c.ChildEntries));
+        // fix-loop #16：我们自己的 gml_Script_ 子条目也必须过读侧推断关——子与父共享
+        // blob 地址 + 紧跟父（写入器全局游标编址 = #4 的劫持机制对我们自己的子条目同样生效）
+        var mslRoots = reloaded.Code.Where(c => c.Name.Content.StartsWith("msl_")).ToList();
+        Assert.NotEmpty(mslRoots);
+        Assert.All(mslRoots, root =>
+        {
+            var child = Assert.Single(root.ChildEntries);
+            Assert.Equal("gml_Script_" + root.Name.Content, child.Name.Content);
+            Assert.Equal(root, child.ParentEntry);
+            Assert.Equal(4u, child.Offset);
+            Assert.Equal(reloaded.Code.IndexOf(root) + 1, reloaded.Code.IndexOf(child));
+        });
     }
 }
