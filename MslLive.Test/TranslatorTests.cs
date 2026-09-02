@@ -9,13 +9,13 @@ namespace MslLive.Test;
 /// 指令字 = opcode&lt;&lt;24 | T2&lt;&lt;20 | T1&lt;&lt;16 | low16；变量操作数 = RefTop&lt;&lt;24 | low24。</summary>
 public class TranslatorTests
 {
-    static readonly Dictionary<string, int> Vars = new() { ["i:spr"] = 1215, ["g:gsave"] = 2000 };
-    static readonly Dictionary<string, int> Calibrated = new() { ["i:drifty"] = 777 };
+    static readonly Dictionary<string, int> Calibrated = new()
+        { ["i:drifty"] = 777, ["g:gsave"] = 2000 };
     static readonly Dictionary<string, int> RegistryFake = new() { ["sprite_exists"] = 645 };
     static readonly Dictionary<string, int> Scripts = new() { ["gml_Script_foo"] = 1350 };
 
     static Translator Make(OpMsg? op = null) => new(op ?? new OpMsg(),
-        vars: Vars, calibrated: Calibrated,
+        calibrated: Calibrated,
         registryIndexOf: n => RegistryFake.GetValueOrDefault(n, -1),
         scriptCodeId: n => Scripts.TryGetValue(n, out var v) ? v : null);
 
@@ -33,25 +33,27 @@ public class TranslatorTests
     }
 
     [Fact]
-    public void Var_Calibrated_WinsOverSimulated()
+    public void Var_Calibrated_InstanceScope()
     {
-        // drifty 不在模拟表——校准值 777 → 100777 = 0x189A9
+        // 校准值 777 → 100777 = 0x189A9（校准语料收割是变量 id 的唯一真源——#21）
         byte[] b = EncodeOne(PushVar("drifty"), Make());
         Assert.Equal(0xA00189A9u, BitConverter.ToUInt32(b, 4));
     }
 
     [Fact]
-    public void Var_SimulatedFallback_InstanceScope()
+    public void Var_UncalibratedSimulated_Reject()
     {
-        // spr 未校准 → 模拟表 i:spr=1215 → 101215 = 0x18B5F
-        byte[] b = EncodeOne(PushVar("spr"), Make());
-        Assert.Equal(0xA0018B5Fu, BitConverter.ToUInt32(b, 4));
+        // #21 fail-closed：模拟表兜底已删除（_ally_hp 事故——模拟 i:2269 写成活体 102269，
+        // 活体 2269 号位实为 _ally_hp；Task 11 早已证模拟有静态不可解漂移）。未校准即拒，
+        // 宁可整批不推也不静默错装。spr 此刻不在校准表 → 必拒。
+        var ex = Assert.Throws<TranslationRejectException>(() => EncodeOne(PushVar("spr"), Make()));
+        Assert.Contains("not calibrated", ex.Message);
     }
 
     [Fact]
     public void Var_GlobalScope_GKeysFirst()
     {
-        // TypeInst=-5 → 先查 "g:"：gsave=2000 → 102000 = 0x18E70
+        // TypeInst=-5 → 先查 "g:"：gsave 校准值 2000 → 102000 = 0x18E70
         byte[] b = EncodeOne(PushVar("gsave", inst: -5), Make());
         Assert.Equal(0xA0018E70u, BitConverter.ToUInt32(b, 4));
     }
@@ -61,8 +63,8 @@ public class TranslatorTests
     {
         // [stacktop]self.X：TypeInst=0 → 主键 "i:" 未命中 → 回落 "g:"；RefTop 0x80 原样保留
         // （S2 黄金 pop.v.v [stacktop]self.scr_unitRenderDrawSprite = 0x80|(100000+1217)）
-        var vars = new Dictionary<string, int> { ["g:scr_unitRenderDrawSprite"] = 1217 };
-        var t = new Translator(new OpMsg(), vars: vars, calibrated: new Dictionary<string, int>(),
+        var calibrated = new Dictionary<string, int> { ["g:scr_unitRenderDrawSprite"] = 1217 };
+        var t = new Translator(new OpMsg(), calibrated: calibrated,
             registryIndexOf: _ => -1, scriptCodeId: _ => null);
         var sem = new SemInstruction
         { Kind = BcEncoder.OpPop, T1 = BcEncoder.TVariable, T2 = BcEncoder.TVariable, Inst = 0, Var = "scr_unitRenderDrawSprite", RefTop = 0x80 };
@@ -75,8 +77,8 @@ public class TranslatorTests
     {
         // TypeInst=-7 → "l:" 键域（[V] 实证：vanilla 845 个 Local+非 Local VARI 并存，
         // 如 target[Self,Global,Local]——分域才不串 id。旧代码落 "i:" 与实例变量同键）
-        var vars = new Dictionary<string, int> { ["l:key"] = 55, ["i:key"] = 999 };
-        var t = new Translator(new OpMsg(), vars: vars, calibrated: new Dictionary<string, int>(),
+        var calibrated = new Dictionary<string, int> { ["l:key"] = 55, ["i:key"] = 999 };
+        var t = new Translator(new OpMsg(), calibrated: calibrated,
             registryIndexOf: _ => -1, scriptCodeId: _ => null);
         byte[] b = EncodeOne(PushVar("key", inst: -7), t);
         Assert.Equal(0xA00186D7u, BitConverter.ToUInt32(b, 4));   // 100000+55 = 100055，不是 i: 的 999
@@ -87,8 +89,8 @@ public class TranslatorTests
     {
         // "l:" 未命中不得回落 "i:"（会静默命中 Self 同名符号 = 错 id）；fail-closed。
         // i↔g 回落保留（[stacktop]self.X 实证需要，见上）。
-        var vars = new Dictionary<string, int> { ["i:key"] = 999 };
-        var t = new Translator(new OpMsg(), vars: vars, calibrated: new Dictionary<string, int>(),
+        var calibrated = new Dictionary<string, int> { ["i:key"] = 999 };
+        var t = new Translator(new OpMsg(), calibrated: calibrated,
             registryIndexOf: _ => -1, scriptCodeId: _ => null);
         Assert.Throws<TranslationRejectException>(() => EncodeOne(PushVar("key", inst: -7), t));
     }
@@ -97,7 +99,7 @@ public class TranslatorTests
     public void Var_Unmapped_Reject()
     {
         var ex = Assert.Throws<TranslationRejectException>(() => EncodeOne(PushVar("product_only_new_var"), Make()));
-        Assert.Contains("unmapped", ex.Message);
+        Assert.Contains("not calibrated", ex.Message);
     }
 
     [Fact]

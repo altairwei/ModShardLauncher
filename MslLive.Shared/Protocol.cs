@@ -57,6 +57,10 @@ public sealed class BatchMsg
     public int Protocol { get; set; } = 1;
     public int BatchSeq { get; set; }
     public List<OpMsg> Ops { get; set; } = new();
+    /// <summary>#21 校准语料：baseline 未改动 entry 的载荷（同 ProofMsg.Ops 形态），agent 在翻译
+    /// 本批任何 op 之前先对其逐个 VarCalibrator.Harvest——变量 id 的唯一真源是 runner 已回填的
+    /// 活 buffer。只收 ParentEntry==null 的根条目（子条目流与共享 buffer 基址错位 4B 不可作语料）。</summary>
+    public List<OpMsg> CalibOps { get; set; } = new();
 }
 
 public sealed class OpReceipt

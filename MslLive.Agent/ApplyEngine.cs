@@ -59,6 +59,7 @@ public static class ApplyEngine
     public static List<OpReceipt>? Enqueue(BatchMsg batch, Func<int, ulong>? slot = null)
     {
         slot ??= TableBuilder.RuntimeSlot;
+        HarvestCalibrations(batch);   // #21：变量 id 真源收割必须先于任何 op 翻译
         var prepared = new List<Prepared>();
         int failAt = -1;
         OpReceipt? failReceipt = null;
@@ -98,6 +99,39 @@ public static class ApplyEngine
         AgentState.Log($"apply batch {batch.BatchSeq}: {prepared.Count} ops queued for next frame");
         return null;
     }
+
+    /// <summary>#21 校准语料收割（_ally_hp 事故的修复核心）：对 batch.CalibOps 逐个——
+    /// 二段解析取活 buffer（与 Prepare 同源的直名 → "gml_Script_"+名 回退；语料只读不换，
+    /// StartOff≠0 的别名子合法——BufPtr 即共享基址，MSL 侧保证语料是 ParentEntry==null 的
+    /// 根流，walk 从基址起对齐）→ VarCalibrator.Harvest 读回 runner 回填的变量 id。
+    /// 收割失败只记日志不拒批——覆盖缺口由 Translator 在编码处 fail-closed（未校准即拒），
+    /// 与 spec D4 的整批语义一致（拒绝发生在 Prepare，回执照常带原因）。
+    /// 时序安全性：本批 swap 的换入发生在 Pump（下一帧），此刻全部活 buffer 仍是 runner
+    /// 原始/上次已校准安装的内容——收割永远先于本批任何换入。</summary>
+    static void HarvestCalibrations(BatchMsg batch)
+    {
+        if (batch.CalibOps.Count == 0) return;
+        int ok = 0;
+        foreach (var op in batch.CalibOps)
+        {
+            // 语料解析：直名 → gml_Script_ 裸名回退（gml_GlobalScript_ 根须剥前缀——子节点名是
+            // 裸名形态；只读不换，StartOff≠0 别名子合法：BufPtr=共享基址，根流 walk 从基址对齐）。
+            // 注意与 Prepare 的回退不同：那是对 swap 目标的既有行为（#17），此处是语料专用。
+            if (!NodeIndex.TryGet(op.Entry, out var node)
+                && !NodeIndex.TryGet("gml_Script_" + BareName(op.Entry), out node))
+            { AgentState.Log($"calib '{op.Entry}': node not found"); continue; }
+            byte[] live = Mem.ReadBytes(node.BufPtr, (int)node.BufLen);
+            if (live.Length == 0) { AgentState.Log($"calib '{op.Entry}': empty/unreadable live buffer"); continue; }
+            var errors = new List<string>();
+            if (!VarCalibrator.Harvest(op, live, errors))
+                AgentState.Log($"calib '{op.Entry}': harvest partial: {string.Join(" | ", errors.Take(2))}");
+            else ok++;
+        }
+        AgentState.Log($"calib: {ok}/{batch.CalibOps.Count} corpus entries harvested clean");
+    }
+
+    static string BareName(string entry) =>
+        entry.StartsWith("gml_GlobalScript_") ? entry.Substring("gml_GlobalScript_".Length) : entry;
 
     /// <summary>单 op Phase 1 链。失败 → 填好 receipt（Stage/Reason）返回 null。</summary>
     static Prepared? Prepare(OpMsg op, OpReceipt receipt, Func<int, ulong> slot)

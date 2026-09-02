@@ -134,7 +134,20 @@ public static class HotPipeline
             ops.Insert(0, BuildSwapOp(stepEntry, boot, product, ranges, resolver, bootCodeNames, bootFnNames, strg, alloc, ref seq));
         }
 
-        result.Batch = new BatchMsg { Ops = ops };
+        // ---- #21 校准语料：本批全部 op 的非内置变量引用键必须在 boot baseline 有语料来源；
+        // 无来源 = 编辑引入了游戏从未加载的新变量名（新 id 只有 runner 会分配，我们无安全
+        // 路径）——诚实拒批并说明，绝不带模拟值静默装错代码（_ally_hp 事故）。
+        var corpus = CalibCorpus.Build(boot, ops, resolver);
+        if (corpus.Missing.Count > 0)
+        {
+            foreach (var (i, key) in corpus.Missing)
+                result.Failures.Add($"{ops[i].Entry}: 变量 '{key[2..]}' 在 boot baseline 无来源" +
+                    "（新变量名无法热分配 id）——本批不推；重启游戏后即可正常载入");
+            result.Batch = null;
+            return result;
+        }
+
+        result.Batch = new BatchMsg { Ops = ops, CalibOps = corpus.Ops };
         return result;
     }
 
@@ -195,7 +208,7 @@ public static class HotPipeline
             LocalsCount = (int)(entry.Product.ChildEntries.FirstOrDefault(c => c.Offset == 4)?.LocalsCount
                 ?? entry.Product.LocalsCount),
             Instructions = payload.Instructions,
-            Variables = payload.Variables,   // 变量名不改写：agent 用 VarsMsg 映射，未映射即拒
+            Variables = payload.Variables,   // 变量名不改写：#21 起 agent 以 CalibOps 语料收割的活体 id 解析，未覆盖即拒
             Functions = OverlayFunctions(payload.Functions, bootFnNames, alloc),
         };
         if (slotTargeted)

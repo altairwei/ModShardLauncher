@@ -46,6 +46,7 @@ public class HotPipelineTests : IDisposable
             new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
         Assert.NotNull(r.Batch);
         Assert.Empty(r.Batch!.Ops);
+        Assert.Empty(r.Batch.CalibOps);   // #21：无 op 即无需求键，语料为空
     }
 
     [Fact]
@@ -56,13 +57,56 @@ public class HotPipelineTests : IDisposable
         var product = Load();
         LiveStubInjector.Inject(product, new LiveQuotas());
         var target = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
-        target.ReplaceGML("msl_live_apply();\nglobal.msl_dbg = 1;", product);
+        // #21：变量须为 baseline 已知名（msl_probe_step 在 stub 里）——全新名字会被诚实拒批
+        target.ReplaceGML("msl_live_apply();\nglobal.msl_probe_step = 1;", product);
         var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
             new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
         Assert.NotNull(r.Batch);
         var op = Assert.Single(r.Batch!.Ops, o => o.Entry == "gml_Object_o_msl_live_Step_0");
         Assert.Equal("swap", op.Kind);
-        Assert.Contains("msl_dbg", op.Variables);
+        Assert.Contains("msl_probe_step", op.Variables);
+        // #21：语料覆盖——g:msl_probe_step 的来源 = baseline 的 stub 自身
+        Assert.Contains(r.Batch.CalibOps, c => c.Entry == "gml_Object_o_msl_live_Step_0"
+            && c.Variables.Contains("msl_probe_step"));
+    }
+
+    /// <summary>#21 fail-closed：编辑引入 baseline 从未见过的变量名 → 整批不推 + 原因含变量名
+    /// 与重启指引（_ally_hp 事故的正解——宁可拒批也不带模拟值错装）。</summary>
+    [Fact]
+    public void ChangedEntry_NewVariableName_RejectedHonestly()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        var target = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
+        target.ReplaceGML("msl_live_apply();\nglobal.msl_never_seen_xyz = 1;", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.Null(r.Batch);
+        Assert.Contains(r.Failures, f => f.Contains("msl_never_seen_xyz") && f.Contains("重启"));
+    }
+
+    /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由
+    /// 被换 entry 自身的 baseline 版供——语料必须含目标 entry 自己（agent 在换入前收割其
+    /// 换装前活 buffer，时序安全）。</summary>
+    [Fact]
+    public void ChangedEntry_UniqueLocal_CoveredByOwnBaseline()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        boot.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0")
+            .ReplaceGML("msl_live_apply();\nvar _probe_local;\n_probe_local = 1;", boot);
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0")
+            .ReplaceGML("msl_live_apply();\nvar _probe_local;\n_probe_local = 2;", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.NotNull(r.Batch);
+        Assert.Contains(r.Batch!.Ops, o => o.Entry == "gml_Object_o_msl_live_Step_0" && o.Kind == "swap");
+        Assert.Contains(r.Batch.CalibOps, c => c.Entry == "gml_Object_o_msl_live_Step_0"
+            && c.Variables.Contains("_probe_local"));
     }
 
     [Fact]

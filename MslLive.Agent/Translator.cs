@@ -5,9 +5,11 @@ namespace MslLive.Agent;
 /// <summary>IOperandResolver 的生产实现（S2 ② 规则表 + Task 11 统一编码模型）。
 /// 每 op 构造一次（携带该 op 的 Strings/Assets 上下文）。
 ///
-/// 变量 id 解析顺序：活体校准表（VarCalibrator——proof 阶段从活 buffer 逐条读回的真实值）
-/// → VarsMsg 模拟表（Task 11 诚实结论：有静态不可解的残余偏移，仅作后备，用一次记一次日志）
-/// → Reject（product-only 新变量，取舍清单）。
+/// 变量 id 解析顺序：活体校准表（VarCalibrator——proof 阶段与 apply 前 CalibOps 语料从活
+/// buffer 逐条读回的真实值）→ Reject。<b>#21 起模拟表兜底删除</b>（_ally_hp 事故：
+/// Task 11 已证模拟有静态不可解残余偏移，00:05 真机 20 个未校准变量全走兜底 →
+/// Magic_Power 模拟 2269 写成活体 102269=_ally_hp。「兜底+记日志」= 用户看不见的静默
+/// 错值；此类路径必须 fail-closed——VarIdSimulator 仅留作 VarCalibrator 的 drift 诊断）。
 /// 内置变量（exe 固定 smallId 表）优先于符号表——名字判据与 runner 语义同源（Task 11 Step 4/5）。
 ///
 /// 键域与 VarIdSimulator 同源：指令 TypeInst == -5(Global) → "g:"，-7(Local) → "l:"，
@@ -20,22 +22,18 @@ namespace MslLive.Agent;
 public sealed class Translator : IOperandResolver
 {
     readonly OpMsg op;
-    readonly IReadOnlyDictionary<string, int> vars;
     readonly IReadOnlyDictionary<string, int> calibrated;
     readonly Func<string, int> registryIndexOf;
     readonly Func<string, int?> scriptCodeId;
-    readonly HashSet<string> simulatedLogged = new();
 
     /// <summary>生产构造：全部留 null（从 AgentState/VarCalibrator/Registry/NodeIndex 静态取）。
     /// 测试经可选参数注入 fake。</summary>
     public Translator(OpMsg op,
-        IReadOnlyDictionary<string, int>? vars = null,
         IReadOnlyDictionary<string, int>? calibrated = null,
         Func<string, int>? registryIndexOf = null,
         Func<string, int?>? scriptCodeId = null)
     {
         this.op = op;
-        this.vars = vars ?? AgentState.VarMap ?? new Dictionary<string, int>();
         this.calibrated = calibrated ?? VarCalibrator.Map;
         this.registryIndexOf = registryIndexOf ?? Registry.IndexOf;
         this.scriptCodeId = scriptCodeId ?? (name => NodeIndex.TryGet(name, out var n) ? (int?)n.CodeId : null);
@@ -57,14 +55,8 @@ public sealed class Translator : IOperandResolver
         string? alt = key[0] == 'l' ? null : key[0] == 'i' ? "g:" + name : "i:" + name;
         if (calibrated.TryGetValue(key, out int id) || (alt != null && calibrated.TryGetValue(alt, out id)))
             return (uint)(100000 + id);
-        if (vars.TryGetValue(key, out id) || (alt != null && vars.TryGetValue(alt, out id)))
-        {
-            // 模拟值兜底：Task 11 已证有残余偏移——用可以，但必须留痕
-            if (simulatedLogged.Add(key))
-                AgentState.Log($"var '{key}' resolved via simulated id {id} (uncalibrated)");
-            return (uint)(100000 + id);
-        }
-        throw new TranslationRejectException($"var '{name}' (inst {instType}) unmapped: not builtin, not calibrated, not in VarsMsg");
+        throw new TranslationRejectException(
+            $"var '{name}' (inst {instType}) unresolved: not builtin, not calibrated (corpus miss or new variable)");
     }
 
     public int ResolveCall(string fn)

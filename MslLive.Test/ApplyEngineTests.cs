@@ -381,4 +381,98 @@ public class ApplyEngineTests : IDisposable
         Assert.Equal(Buf, R64(AliasRecord + 0x18));
         Assert.Empty(Mem.TestAllocs);
     }
+
+    // ---- #21 校准语料（CalibOps）：变量 id 唯一真源 = runner 已回填的活 buffer ----
+
+    const ulong NodeB = 0x10300, RecordB = 0x10A00, NameB = 0x10E00, BufB = 0x11600;
+
+    /// <summary>语料/换入共用指令流：[push.v spr, popz]（spr = vanilla 真实非内置实例变量名，
+    /// VarIdSimulator 注释锚点 spr=1215）。</summary>
+    static List<SemInstruction> PushSprSems() => new()
+    {
+        new() { Kind = BcEncoder.OpPush, T1 = BcEncoder.TVariable, Inst = -1, Var = "spr", RefTop = 0xA0 },
+        new() { Kind = BcEncoder.OpPopz, T1 = BcEncoder.TVariable },
+    };
+
+    /// <summary>#21 主回归：Enqueue 必须先对 CalibOps 收割再翻译——swap op 的 spr 操作数必须
+    /// 等于语料 entry 活 buffer 里 runner 回填的真值（100000+4242），不是任何静态表的值。
+    /// 修复前此测试红：CalibOps 被忽略 → 翻译未校准 → 整批拒绝。</summary>
+    [Fact]
+    public void Enqueue_CalibOps_HarvestLiveIds_BeforeTranslate()
+    {
+        // 语料 entry_a 的活 buffer：用校准表 4242 编码 = 模拟 runner 装载时的回填产物
+        var sems = PushSprSems();
+        byte[] liveA = BcEncoder.Encode(sems, new Translator(new OpMsg(),
+            calibrated: new Dictionary<string, int> { ["i:spr"] = 4242 },
+            registryIndexOf: _ => -1, scriptCodeId: _ => null));
+        PlantNode(Node, Record, Name, Buf, "entry_a", live: liveA);
+        PlantNode(NodeB, RecordB, NameB, BufB, "entry_b");
+        Assert.Equal(2, NodeIndex.Build());
+
+        var batch = new BatchMsg { BatchSeq = 9 };
+        batch.CalibOps.Add(new OpMsg { Seq = -1, Kind = "calib", Entry = "entry_a", Instructions = sems });
+        batch.Ops.Add(new OpMsg { Seq = 0, Kind = "swap", Entry = "entry_b", LocalsCount = 2, Instructions = PushSprSems() });
+
+        Assert.Null(ApplyEngine.Enqueue(batch, FakeSlot));   // 收割命中 → 翻译通过 → 入队
+        ApplyEngine.Pump();
+
+        ulong ptr = R64(RecordB + 0x18);
+        Assert.True(Mem.TestAllocs.ContainsKey(ptr));
+        Assert.Equal(0xA0019732u, BitConverter.ToUInt32(Mem.TestAllocs[ptr], 4));   // 0xA0 | 104242
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+    }
+
+    /// <summary>#21 语料解析补钉：gml_GlobalScript_ 根语料在 NodeIndex 里无直名节点（#17 实证：
+    /// 运行时按绑定建节点，SCPT/FUNC 指向 gml_Script_ 裸名子）——收割必须剥前缀回退子名，
+    /// 且子的 StartOff=4（≠0）也合法（只读不换：BufPtr=共享基址，根流含 4B 引导 B 从基址起对齐）。
+    /// 修复前此测试红：回退拼成 gml_Script_gml_GlobalScript_scr_foo → node not found →
+    /// 未收割 → swap op 未校准拒绝。</summary>
+    [Fact]
+    public void Enqueue_CalibOps_GlobalScriptRoot_ViaBareScriptChild()
+    {
+        // wrapper 根流形态：[B 引导 4B][push.v spr][popz] = 16B，与活 buffer 等长（Harvest 尾检）
+        var rootSems = new List<SemInstruction>
+        {
+            new() { Kind = BcEncoder.OpB, Jump = 12 },
+            new() { Kind = BcEncoder.OpPush, T1 = BcEncoder.TVariable, Inst = -1, Var = "spr", RefTop = 0xA0 },
+            new() { Kind = BcEncoder.OpPopz, T1 = BcEncoder.TVariable },
+        };
+        byte[] liveRoot = BcEncoder.Encode(rootSems, new Translator(new OpMsg(),
+            calibrated: new Dictionary<string, int> { ["i:spr"] = 4242 },
+            registryIndexOf: _ => -1, scriptCodeId: _ => null));
+        // 活节点只有子名形态（StartOff=4，BufPtr=共享基址 = 根流起点）
+        PlantNode(Node, Record, Name, Buf, "gml_Script_scr_foo", startOff: 4, live: liveRoot);
+        PlantNode(NodeB, RecordB, NameB, BufB, "entry_b");
+        Assert.Equal(2, NodeIndex.Build());
+
+        var batch = new BatchMsg { BatchSeq = 9 };
+        batch.CalibOps.Add(new OpMsg { Seq = -1, Kind = "calib", Entry = "gml_GlobalScript_scr_foo", Instructions = rootSems });
+        batch.Ops.Add(new OpMsg { Seq = 0, Kind = "swap", Entry = "entry_b", LocalsCount = 2, Instructions = PushSprSems() });
+
+        Assert.Null(ApplyEngine.Enqueue(batch, FakeSlot));   // 剥前缀回退命中 → 收割 → 翻译通过
+        ApplyEngine.Pump();
+
+        ulong ptr = R64(RecordB + 0x18);
+        Assert.Equal(0xA0019732u, BitConverter.ToUInt32(Mem.TestAllocs[ptr], 4));   // 0xA0 | 104242
+    }
+
+    /// <summary>#21 fail-closed 钉版：无 CalibOps 且未校准的变量 → validate 拒绝，整批不换。
+    /// （修复前后皆绿——防未来有人把兜底加回来而不带任何拒绝语义。）</summary>
+    [Fact]
+    public void Enqueue_NoCalibOps_UncalibratedVar_Reject()
+    {
+        PlantNode(NodeB, RecordB, NameB, BufB, "entry_b");
+        Assert.Equal(1, NodeIndex.Build());
+
+        var batch = new BatchMsg { BatchSeq = 9 };
+        batch.Ops.Add(new OpMsg { Seq = 0, Kind = "swap", Entry = "entry_b", LocalsCount = 2, Instructions = PushSprSems() });
+
+        var r = Assert.Single(ApplyEngine.Enqueue(batch, FakeSlot)!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("not calibrated", r.Reason);
+        Assert.Equal(BufB, R64(RecordB + 0x18));   // 未换
+        Assert.Empty(Mem.TestAllocs);              // 未分配
+    }
 }
