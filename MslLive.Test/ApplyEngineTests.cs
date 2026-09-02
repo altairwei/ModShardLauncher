@@ -294,4 +294,91 @@ public class ApplyEngineTests : IDisposable
         Assert.Contains("locals mismatch", r.Reason);
         Assert.Equal(Buf, R64(Record + 0x18));
     }
+
+    // ---- #19 handler 表/pcmap 交换面（与 Trampoline 同根因同修复）----
+
+    /// <summary>假通用槽：class → 0xA000+class（与 TableBuilderTests 同款）。</summary>
+    static ulong FakeSlot(int cls) => 0xA000 + (ulong)cls;
+
+    [Fact]
+    public void Enqueue_Pump_WritesHandlerTableAndPcmap()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a");
+        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", startOff: 4);
+        Assert.Equal(2, NodeIndex.Build());
+
+        Assert.Null(ApplyEngine.Enqueue(Batch(PopzOp("entry_a", 3)), FakeSlot));
+        Assert.Equal(0UL, R64(Record + 0x20));          // Phase 1 绝不写任何记录字段
+
+        ApplyEngine.Pump();
+
+        // #19 全量交换面：+0x08/+0x18/+0x20/+0x28 四字段同换（缺表/pcmap = 旧特化产物
+        // 把新 buffer 当操作数源静默空跑——trampoline 6000 帧零 entry 的同根因）
+        var encoded = BcEncoder.Encode(PopzOp("entry_a", 3).Instructions, new Translator(new OpMsg()));
+        var (table, map) = TableBuilder.Build(encoded, FakeSlot);
+        foreach (var rec in new[] { Record, AliasRecord })
+        {
+            Assert.Equal(12u, R32(rec + 0x08));
+            ulong tbl = R64(rec + 0x20), mp = R64(rec + 0x28);
+            Assert.True(Mem.TestAllocs.ContainsKey(tbl));
+            Assert.True(Mem.TestAllocs.ContainsKey(mp));
+            Assert.Equal(table, Mem.TestAllocs[tbl]);
+            Assert.Equal(map, Mem.TestAllocs[mp]);
+        }
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+    }
+
+    /// <summary>#19 真机自证（fail-closed）：旧 record 已特化（+0x20≠0）时按旧 buffer 重算
+    /// 比对，不等即拒（validate 阶段）且一个都不换、什么都不分配。</summary>
+    [Fact]
+    public void Enqueue_OldTableMismatch_ValidateFail_NothingAllocated()
+    {
+        var live = new byte[8];   // 旧 buffer = 2 条零字指令（op 0，4B 步进）
+        PlantNode(Node, Record, Name, Buf, "entry_a", live: live);
+        var (table, map) = TableBuilder.Build(live, FakeSlot);
+        var badTable = table.ToArray();
+        badTable[0] ^= 0xFF;
+        badTable.CopyTo(Mem.TestMap!, (int)(0x11800 - Base));
+        map.CopyTo(Mem.TestMap!, (int)(0x11A00 - Base));
+        W64(Record + 0x20, 0x11800);
+        W64(Record + 0x28, 0x11A00);
+        NodeIndex.Build();
+
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(PopzOp("entry_a", 1)), FakeSlot)!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("self-proof", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));          // 未换
+        Assert.Equal(0x11800UL, R64(Record + 0x20));    // 旧表未动
+        Assert.Empty(Mem.TestAllocs);                   // 自证先于任何分配
+    }
+
+    /// <summary>自证是逐别名记录的：任一共享记录的活表与重算不符 → 整批拒。</summary>
+    [Fact]
+    public void Enqueue_AliasOldTableMismatch_Rejected()
+    {
+        var live = new byte[8];
+        PlantNode(Node, Record, Name, Buf, "entry_a", live: live);
+        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", startOff: 4, live: live);
+        var (table, map) = TableBuilder.Build(live, FakeSlot);
+        table.CopyTo(Mem.TestMap!, (int)(0x11800 - Base));
+        map.CopyTo(Mem.TestMap!, (int)(0x11A00 - Base));
+        W64(Record + 0x20, 0x11800);                    // 根记录活表全等
+        W64(Record + 0x28, 0x11A00);
+        var badTable = table.ToArray();
+        badTable[8] ^= 0xFF;
+        badTable.CopyTo(Mem.TestMap!, (int)(0x11C00 - Base));
+        map.CopyTo(Mem.TestMap!, (int)(0x11E00 - Base));
+        W64(AliasRecord + 0x20, 0x11C00);               // 别名子活表破了
+        W64(AliasRecord + 0x28, 0x11E00);
+        NodeIndex.Build();
+
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(PopzOp("entry_a", 1)), FakeSlot)!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("self-proof", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));
+        Assert.Equal(Buf, R64(AliasRecord + 0x18));
+        Assert.Empty(Mem.TestAllocs);
+    }
 }

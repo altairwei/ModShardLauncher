@@ -10,14 +10,18 @@ namespace MslLive.Agent;
 /// 子体——子才是帧主；多子 wrapper 取最小偏移的主子），无别名子则节点自身；op.LocalsCount
 /// ≤ frameOwner.Locals——交换不 patch record+0x0C，帧容量以 boot 值为上限，载荷局部数
 /// 超容量即拒（v1 已知限制：locals 数增长不热更）；另核对全部别名的 node+0xA0 ==
-/// record+0x0C 镜像一致——交换面完整性）→ 编码（Translator/BcEncoder，Reject 归
-/// validate）→ VirtualAlloc(RW) 写新 buffer（失败归 validate 提前量——commit 设计为不可失败）
-/// → 收集共享旧 buffer 的全部执行记录（S2④ 父子别名同 buffer，S3 交换面 = 执行记录 +0x18）。
+/// record+0x0C 镜像一致——交换面完整性；#19 自证：已特化旧记录按旧 buffer 重算 handler
+/// 表/pcmap 与活表比对，不等即拒）→ 编码（Translator/BcEncoder，Reject 归
+/// validate）→ TableBuilder 建 handler 表/pcmap（#19：线程化代码 VM 派发走 record+0x20
+/// 表，表/pcmap 必须随 buffer 同换）→ VirtualAlloc(RW) 写新 buffer+表+pcmap（失败归
+/// validate 提前量——commit 设计为不可失败）→ 收集共享旧 buffer 的全部执行记录
+/// （S2④ 父子别名同 buffer；#19 全量交换面 = +0x08/+0x18/+0x20/+0x28 四字段）。
 /// 任一 op 失败 → 整批不入队：已分配 buffer 留置不 free（与旧 buffer 同策），一个都不换
 /// （半应用 = 新旧代码互相调用 = 状态不一致），失败 op 记真实原因、其余记 batch aborted。
 /// Phase 2（游戏线程，msl_live_apply thunk → Pump）：先补上一批的 pendingRestore（trigger 配对
-/// restore，下一帧此刻 RunGml 已跑完一帧），再逐 prepared 写 record+0x08 长度、+0x18 指针
-/// （游戏线程无并发读者；旧 buffer 永不释放）。restore op 不当帧换入——记为 pendingRestore，
+/// restore，下一帧此刻 RunGml 已跑完一帧），再逐 prepared 四字段写（+0x08→+0x18→+0x28→
+/// +0x20，buffer 先于表 = 安全窗，见 TableBuilder.WriteRecord；游戏线程无并发读者；
+/// 旧 buffer 永不释放）。restore op 不当帧换入——记为 pendingRestore，
 /// 其 receipt 在本批回执里即记 Ok（它保证下一帧执行；游戏若先关则整局皆休）。回执只置
 /// 出站信箱，pipe 线程轮询转发（游戏线程写 pipe 可能阻塞 VM；MSL 30s 超时兜底=诚实超时）。</summary>
 public static class ApplyEngine
@@ -28,6 +32,8 @@ public static class ApplyEngine
         public byte[] Bytes = null!;
         public List<ulong> Records = null!;
         public ulong NewBuf;
+        public ulong NewTable;   // #19：handler 表（record+0x20）与 pcmap（+0x28）随 buffer 同换
+        public ulong NewMap;
         public OpReceipt Receipt = null!;
     }
 
@@ -48,9 +54,11 @@ public static class ApplyEngine
     }
 
     /// <summary>Phase 1。返回 null = 整批通过已入队（回执待 Pump）；否则 = 整批放弃的最终回执
-    /// （调用方立即回给 MSL，无 Pump 必要）。</summary>
-    public static List<OpReceipt>? Enqueue(BatchMsg batch)
+    /// （调用方立即回给 MSL，无 Pump 必要）。slot = 通用槽解析器（生产 = 运行时读游戏槽表，
+    /// 测试注入假槽——TableBuilder 的特化复刻真源）。</summary>
+    public static List<OpReceipt>? Enqueue(BatchMsg batch, Func<int, ulong>? slot = null)
     {
+        slot ??= TableBuilder.RuntimeSlot;
         var prepared = new List<Prepared>();
         int failAt = -1;
         OpReceipt? failReceipt = null;
@@ -58,7 +66,7 @@ public static class ApplyEngine
         {
             var op = batch.Ops[i];
             var receipt = new OpReceipt { Seq = op.Seq, Entry = op.Entry, Stage = "resolve" };
-            var p = Prepare(op, receipt);
+            var p = Prepare(op, receipt, slot);
             if (p == null) { failAt = i; failReceipt = receipt; break; }
             prepared.Add(p);
         }
@@ -92,7 +100,7 @@ public static class ApplyEngine
     }
 
     /// <summary>单 op Phase 1 链。失败 → 填好 receipt（Stage/Reason）返回 null。</summary>
-    static Prepared? Prepare(OpMsg op, OpReceipt receipt)
+    static Prepared? Prepare(OpMsg op, OpReceipt receipt, Func<int, ulong> slot)
     {
         // #17 外扫实证（nodescan 普查）：运行时 exec 节点按「绑定」创建（SCPT/FUNC/事件/
         // GlobalInit 指向谁谁才有节点），不按 Code 条目——wrapper 根（槽/loader/函数声明
@@ -125,18 +133,36 @@ public static class ApplyEngine
             if (recordLocals != a.Locals)
             { receipt.Reason = $"locals mismatch: node {a.Locals} != record+0x0C {recordLocals}"; return null; }
         }
+        // #19 真机自证（fail-closed）：任一共享记录已特化（+0x20≠0）就按旧 buffer 重算
+        // 表/pcmap 与活表逐字节比对——不等 = 特化规则复刻错了，换入即野派发，整批拒
+        foreach (var a in aliases)
+            if (!TableBuilder.SelfProofRecord(a.Record, slot, out var why))
+            { receipt.Reason = $"specialization self-proof: {why}"; return null; }
 
         byte[] bytes;
         try { bytes = BcEncoder.Encode(op.Instructions, new Translator(op)); }
         catch (TranslationRejectException ex) { receipt.Reason = ex.Message; return null; }
         if (bytes.Length == 0) { receipt.Reason = "empty payload"; return null; }
 
+        // #19 线程化代码 VM：派发走 record+0x20 handler 表（首执行按 buffer 懒构建）——
+        // 表/pcmap 必须与 buffer 同换，且在 Phase 1 构建+分配（commit 设计为不可失败）
+        byte[] table, pcmap;
+        try { (table, pcmap) = TableBuilder.Build(bytes, slot); }
+        catch (TranslationRejectException ex) { receipt.Reason = ex.Message; return null; }
+
         ulong newBuf = Mem.AllocRW(bytes);
-        if (newBuf == 0) { receipt.Reason = "VirtualAlloc failed"; return null; }   // commit 不可失败 → 提前量归 validate
+        ulong newTable = Mem.AllocRW(table);
+        ulong newMap = Mem.AllocRW(pcmap);
+        if (newBuf == 0 || newTable == 0 || newMap == 0)
+        { receipt.Reason = "VirtualAlloc failed"; return null; }   // commit 不可失败 → 提前量归 validate
 
         var records = aliases.Select(n => n.Record).ToList();
         if (records.Count == 0) { receipt.Reason = "no execution records share the buffer"; return null; }
-        return new Prepared { Op = op, Bytes = bytes, Records = records, NewBuf = newBuf, Receipt = receipt };
+        return new Prepared
+        {
+            Op = op, Bytes = bytes, Records = records,
+            NewBuf = newBuf, NewTable = newTable, NewMap = newMap, Receipt = receipt,
+        };
     }
 
     /// <summary>Phase 2（游戏线程）。restore 优先，然后整批指针写；回执置出站信箱。</summary>
@@ -187,13 +213,6 @@ public static class ApplyEngine
     static void CommitOne(Prepared p)
     {
         foreach (var record in p.Records)
-            WriteBuffer(record, p.NewBuf, p.Bytes.Length);
-    }
-
-    /// <summary>执行记录交换面（S3）：先长度后指针（Task 14 trampoline 同款顺序）。</summary>
-    public static void WriteBuffer(ulong record, ulong newBuf, int newLen)
-    {
-        Mem.WriteU32(record + 0x08, (uint)newLen);
-        Mem.WriteU64(record + 0x18, newBuf);
+            TableBuilder.WriteRecord(record, (uint)p.Bytes.Length, p.NewBuf, p.NewTable, p.NewMap);
     }
 }

@@ -257,4 +257,126 @@ public class TrampolineTests : IDisposable
         Assert.Contains("stub node not found", Trampoline.LastError);
         Assert.Empty(Mem.TestAllocs);
     }
+
+    // ---- #19 handler 表/pcmap 交换面（TableBuilder 复刻特化规则 + 四字段写 + 旧表自证）----
+
+    /// <summary>假通用槽：class → 0xA000+class（与 TableBuilderTests 同款，逐类可区分）。</summary>
+    static ulong FakeSlot(int cls) => 0xA000 + (ulong)cls;
+
+    // TestMap 空闲区（fixture 占用 ≤0x11144）：种旧表/旧 pcmap 用
+    const ulong OldTableA = 0x11800, OldMapA = 0x11A00, OldTableB = 0x11C00, OldMapB = 0x11E00;
+
+    static ulong PlantBytes(ulong at, byte[] bytes)
+    {
+        bytes.CopyTo(Mem.TestMap!, (int)(at - Base));
+        return at;
+    }
+
+    /// <summary>按 fixture 形态种「旧特化产物」：根 record（len=68）与 child record（len=64=
+    /// 子跨度）各自的 +0x20/+0x28 —— 内容与 TableBuilder 对各自 record 视图的重算全等。</summary>
+    static void PlantOldTables(ulong rootRec, ulong childRec, byte[] dummy)
+    {
+        var root = TableBuilder.Build(dummy, FakeSlot);
+        W64(rootRec + 0x20, PlantBytes(OldTableA, root.Table));
+        W64(rootRec + 0x28, PlantBytes(OldMapA, root.PcMap));
+        var child = TableBuilder.Build(dummy.Take(64).ToArray(), FakeSlot);
+        W64(childRec + 0x20, PlantBytes(OldTableB, child.Table));
+        W64(childRec + 0x28, PlantBytes(OldMapB, child.PcMap));
+    }
+
+    [Fact]
+    public void Install_WritesHandlerTableAndPcmap_FourFieldSwap()
+    {
+        PlantBothStubs();
+        NativeRegistration.ApplyIndex = 900;
+        NativeRegistration.ReportIndex = 901;
+
+        Assert.True(Trampoline.Install(FakeRegistry, FakeSlot), Trampoline.LastError);
+
+        // #19 全量交换面：+0x08 长度、+0x18 buffer、+0x20 handler 表、+0x28 pcmap——
+        // 缺了表/pcmap，旧特化产物把新 buffer 当操作数源静默空跑（6000 帧零 entry 的根因）
+        var (applyTable, applyMap) = TableBuilder.Build(ApplyTrampoline, FakeSlot);
+        foreach (var rec in new[] { ApplyRecord, ApplyChildRecord })
+        {
+            Assert.Equal((uint)ApplyTrampoline.Length, R32(rec + 0x08));
+            ulong tbl = R64(rec + 0x20), map = R64(rec + 0x28);
+            Assert.True(Mem.TestAllocs.ContainsKey(tbl));
+            Assert.True(Mem.TestAllocs.ContainsKey(map));
+            Assert.Equal(applyTable, Mem.TestAllocs[tbl]);
+            Assert.Equal(applyMap, Mem.TestAllocs[map]);
+        }
+
+        var (reportTable, reportMap) = TableBuilder.Build(ReportTrampoline, FakeSlot);
+        foreach (var rec in new[] { ReportRecord, ReportChildRecord })
+        {
+            Assert.Equal((uint)ReportTrampoline.Length, R32(rec + 0x08));
+            ulong tbl = R64(rec + 0x20), map = R64(rec + 0x28);
+            Assert.Equal(reportTable, Mem.TestAllocs[tbl]);
+            Assert.Equal(reportMap, Mem.TestAllocs[map]);
+        }
+    }
+
+    /// <summary>#19 真机自证（fail-closed）：旧 record 已特化（+0x20≠0）时按旧 buffer 重算
+    /// 表/pcmap 与活表逐字节比对——全等才装（不等 = 我们的特化规则复刻错了，装上即野派发）。
+    /// 未特化（+0x20==0）跳过自证——首执行会按新 buffer 建表（spike 当年的偶然形态）。</summary>
+    [Fact]
+    public void Install_OldTableMatches_SelfProofPasses()
+    {
+        PlantBothStubs();
+        NativeRegistration.ApplyIndex = 900;
+        NativeRegistration.ReportIndex = 901;
+        PlantOldTables(ApplyRecord, ApplyChildRecord, WrapperDummy());
+
+        Assert.True(Trampoline.Install(FakeRegistry, FakeSlot), Trampoline.LastError);
+
+        // 装上的表/pcmap 是新分配（TestAllocs 内），不是旧表地址；内容 = 新 trampoline 的重算
+        ulong tbl = R64(ApplyRecord + 0x20), map = R64(ApplyRecord + 0x28);
+        Assert.NotEqual(OldTableA, tbl);
+        var (expTable, expMap) = TableBuilder.Build(ApplyTrampoline, FakeSlot);
+        Assert.Equal(expTable, Mem.TestAllocs[tbl]);
+        Assert.Equal(expMap, Mem.TestAllocs[map]);
+    }
+
+    [Fact]
+    public void Install_OldTableMismatch_FailClosed_NoSwap()
+    {
+        PlantBothStubs();
+        NativeRegistration.ApplyIndex = 900;
+        NativeRegistration.ReportIndex = 901;
+        var (table, map) = TableBuilder.Build(WrapperDummy(), FakeSlot);
+        var badTable = table.ToArray();
+        badTable[2 * 8] ^= 0xFF;   // 第 3 个 qword 翻一字节（特化复刻错了的替身）
+        W64(ApplyRecord + 0x20, PlantBytes(OldTableA, badTable));
+        W64(ApplyRecord + 0x28, PlantBytes(OldMapA, map));
+
+        Assert.False(Trampoline.Install(FakeRegistry, FakeSlot));
+        Assert.Contains("self-proof", Trampoline.LastError);
+        Assert.Equal(ApplyBuf, R64(ApplyRecord + 0x18));        // buffer 原封不动
+        Assert.Equal(OldTableA, R64(ApplyRecord + 0x20));       // 旧表也没动
+        Assert.Equal(68u, R32(ApplyRecord + 0x08));
+        // 自证先于任何分配：apply 零分配；全部 3 块 alloc 都是 report 的（code+表+pcmap）
+        Assert.Equal(3, Mem.TestAllocs.Count);
+        // report 独立安装（ok &= 语义：单 stub 自证失败不株连另一个）
+        Assert.NotEqual(ReportBuf, R64(ReportRecord + 0x18));
+    }
+
+    [Fact]
+    public void Install_OldPcmapMismatch_FailClosed_NoSwap()
+    {
+        PlantBothStubs();
+        NativeRegistration.ApplyIndex = 900;
+        NativeRegistration.ReportIndex = 901;
+        var (table, map) = TableBuilder.Build(WrapperDummy(), FakeSlot);
+        var badMap = map.ToArray();
+        badMap[3 * 4] ^= 0xFF;   // 第 4 个 dword 翻一字节
+        W64(ApplyRecord + 0x20, PlantBytes(OldTableA, table));
+        W64(ApplyRecord + 0x28, PlantBytes(OldMapA, badMap));
+
+        Assert.False(Trampoline.Install(FakeRegistry, FakeSlot));
+        Assert.Contains("self-proof", Trampoline.LastError);
+        Assert.Contains("pcmap", Trampoline.LastError);
+        Assert.Equal(ApplyBuf, R64(ApplyRecord + 0x18));
+        // apply 零分配；全部 3 块 alloc 都是 report 的（code+表+pcmap）
+        Assert.Equal(3, Mem.TestAllocs.Count);
+    }
 }

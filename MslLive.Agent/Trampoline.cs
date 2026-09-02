@@ -14,8 +14,11 @@ namespace MslLive.Agent;
 /// call 操作数经 Translator 走 Registry.IndexOf（原生注册后的真实槽位），并与
 /// NativeRegistration 捕获的索引交叉断言。旧 buffer 永不释放（S3 旧帧安全）。
 /// 根/子执行记录共享同一 buffer（S2④：两条执行记录 +0x18 同指 BUF；#17 实证修正：
-/// msl wrapper 根无节点，只有子一条记录）——交换循环按 BufPtr 收集全部共享记录
-/// （+0x08 长度、+0x18 指针同值写入，形态无关）。
+/// msl wrapper 根无节点，只有子一条记录）——交换循环按 BufPtr 收集全部共享记录。
+/// #19 全量交换面：+0x08 长度、+0x18 buffer、+0x20 handler 表、+0x28 pcmap 四字段同换
+/// （线程化代码 VM 派发走 +0x20 表，只换 buffer = 旧表把新字节当操作数静默空跑）；
+/// 表/pcmap 由 TableBuilder 复刻 EnsureSpecialized 规则构建，安装前对旧表自证（fail-closed）。
+/// 写序 +0x08→+0x18→+0x28→+0x20（buffer 先于表 = 安全窗，见 TableBuilder.WriteRecord）。
 /// 幂等：进程内已安装的 stub 不重复安装（proof 重连重发不会把 trampoline 当 dummy 判死）。</summary>
 public static class Trampoline
 {
@@ -29,10 +32,11 @@ public static class Trampoline
 
     internal static void ResetForTest() { installed.Clear(); LastError = ""; }
 
-    public static bool Install(Func<string, int>? registryIndexOf = null)
+    public static bool Install(Func<string, int>? registryIndexOf = null, Func<int, ulong>? slot = null)
     {
-        bool ok = InstallOne(ApplyName, NativeRegistration.ApplyIndex, withArg: false, registryIndexOf);
-        ok &= InstallOne(ReportName, NativeRegistration.ReportIndex, withArg: true, registryIndexOf);
+        slot ??= TableBuilder.RuntimeSlot;
+        bool ok = InstallOne(ApplyName, NativeRegistration.ApplyIndex, withArg: false, registryIndexOf, slot);
+        ok &= InstallOne(ReportName, NativeRegistration.ReportIndex, withArg: true, registryIndexOf, slot);
         return ok;
     }
 
@@ -56,7 +60,8 @@ public static class Trampoline
         new() { Kind = BcEncoder.OpExit, T1 = BcEncoder.TInt32 },
     };
 
-    static bool InstallOne(string name, int nativeIndex, bool withArg, Func<string, int>? registryIndexOf)
+    static bool InstallOne(string name, int nativeIndex, bool withArg, Func<string, int>? registryIndexOf,
+        Func<int, ulong> slot)
     {
         if (installed.Contains(name)) return true;
         if (nativeIndex < 0) return Fail($"trampoline {name}: native not registered");
@@ -97,16 +102,28 @@ public static class Trampoline
         if (encodedIdx != (uint)nativeIndex)
             return Fail($"trampoline {name}: encoded call target {encodedIdx} != registered native {nativeIndex}");
 
-        ulong newBuf = Mem.AllocRW(code);
-        if (newBuf == 0) return Fail($"trampoline {name}: VirtualAlloc failed");
+        // #19 线程化代码 VM：派发走 record+0x20 handler 表（首执行按 buffer 懒构建），buffer
+        // 仅供操作数——换 buffer 必须连表/pcmap 一起换，否则旧表把新字节当操作数静默空跑。
+        byte[] table, pcmap;
+        try { (table, pcmap) = TableBuilder.Build(code, slot); }
+        catch (TranslationRejectException ex) { return Fail($"trampoline {name}: {ex.Message}"); }
+
         // 共享旧 buffer 的全部执行记录一起换（S2④：根+子双记录共享 BufPtr——两条都写）
-        foreach (var n in NodeIndex.All.Where(n => n.BufPtr == node.BufPtr))
-        {
-            Mem.WriteU32(n.Record + 0x08, (uint)code.Length);
-            Mem.WriteU64(n.Record + 0x18, newBuf);
-        }
+        var sharing = NodeIndex.All.Where(n => n.BufPtr == node.BufPtr).ToList();
+        // #19 真机自证（fail-closed）：任一共享记录已特化（+0x20≠0）就用构建器对旧 buffer
+        // 重算、与活表逐字节比对——不等 = 特化规则复刻错了，装上即野派发，拒装
+        foreach (var n in sharing)
+            if (!TableBuilder.SelfProofRecord(n.Record, slot, out var why))
+                return Fail($"trampoline {name}: specialization self-proof: {why}");
+
+        ulong newBuf = Mem.AllocRW(code);
+        ulong newTable = Mem.AllocRW(table);
+        ulong newMap = Mem.AllocRW(pcmap);
+        if (newBuf == 0 || newTable == 0 || newMap == 0) return Fail($"trampoline {name}: VirtualAlloc failed");
+        foreach (var n in sharing)
+            TableBuilder.WriteRecord(n.Record, (uint)code.Length, newBuf, newTable, newMap);
         installed.Add(name);
-        AgentState.Log($"trampoline installed: {name} ({code.Length}B -> native #{nativeIndex}, buf 0x{newBuf:X})");
+        AgentState.Log($"trampoline installed: {name} ({code.Length}B -> native #{nativeIndex}, buf 0x{newBuf:X}, table 0x{newTable:X})");
         return true;
     }
 
