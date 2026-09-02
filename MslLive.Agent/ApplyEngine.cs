@@ -143,12 +143,15 @@ public static class ApplyEngine
         // op.Entry=裸根名直名 miss → 回退子名把住共享 buffer：子是句柄不是 op 目标，
         // alias-child 守卫只对直名命中生效（直名命中且 StartOff≠0 = op 目标本身是子条目
         // ——CodeDiffer 已滤，防御性守卫，见 Enqueue_AliasChildEntry_ResolveFail）。
+        // #22：回退须先剥 gml_GlobalScript_ 前缀（改既有 vanilla 脚本时 op.Entry=根名，
+        // 不剥会拼出 gml_Script_gml_GlobalScript_ 错名误拒——见
+        // Enqueue_SwapOp_GlobalScriptRoot_ViaBareScriptChild）。
         if (NodeIndex.TryGet(op.Entry, out var node))
         {
             if (node.StartOff != 0)
             { receipt.Reason = $"alias child entry (startOff={node.StartOff}), not swappable"; return null; }
         }
-        else if (!NodeIndex.TryGet("gml_Script_" + op.Entry, out node))
+        else if (!NodeIndex.TryGet("gml_Script_" + BareName(op.Entry), out node))
         { receipt.Reason = "node not found"; return null; }
 
         receipt.Stage = "validate";

@@ -458,6 +458,37 @@ public class ApplyEngineTests : IDisposable
         Assert.Equal(0xA0019732u, BitConverter.ToUInt32(Mem.TestAllocs[ptr], 4));   // 0xA0 | 104242
     }
 
+    /// <summary>#22：改既有 vanilla 脚本的 swap 解析——op.Entry = gml_GlobalScript_ 根名
+    /// （CodeDiffer 滤子条目后 ChangedEntry 就是根名，boot 已存在条目不改名），而运行时只有
+    /// gml_Script_+裸名 子节点（#17：按绑定建节点，wrapper 根无节点）——Prepare 回退必须剥
+    /// gml_GlobalScript_ 前缀，否则拼出 gml_Script_gml_GlobalScript_ 错名误拒「node not found」。
+    /// 载荷 = 完整 wrapper 根流（[B 引导][body]——与 #16b 槽路径同构）。修复前此测试红。</summary>
+    [Fact]
+    public void Enqueue_SwapOp_GlobalScriptRoot_ViaBareScriptChild()
+    {
+        var rootSems = new List<SemInstruction>
+        {
+            new() { Kind = BcEncoder.OpB, Jump = 8 },          // wrapper 引导（4B）
+            new() { Kind = BcEncoder.OpPopz, T1 = BcEncoder.TVariable },
+            new() { Kind = BcEncoder.OpPopz, T1 = BcEncoder.TVariable },
+        };
+        // 活节点只有子名形态（StartOff=4，BufPtr=共享基址，record 覆盖整 buffer 12B）
+        PlantNode(Node, Record, Name, Buf, "gml_Script_scr_foo", startOff: 4, live: new byte[12]);
+        Assert.Equal(1, NodeIndex.Build());
+
+        var batch = new BatchMsg { BatchSeq = 10 };
+        batch.Ops.Add(new OpMsg { Seq = 0, Kind = "swap", Entry = "gml_GlobalScript_scr_foo", LocalsCount = 2, Instructions = rootSems });
+
+        Assert.Null(ApplyEngine.Enqueue(batch, FakeSlot));   // 剥前缀回退命中子节点 → 入队
+        ApplyEngine.Pump();
+
+        ulong ptr = R64(Record + 0x18);
+        Assert.True(Mem.TestAllocs.ContainsKey(ptr));        // 整 buffer 已换入
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+    }
+
     /// <summary>#21 fail-closed 钉版：无 CalibOps 且未校准的变量 → validate 拒绝，整批不换。
     /// （修复前后皆绿——防未来有人把兜底加回来而不带任何拒绝语义。）</summary>
     [Fact]
