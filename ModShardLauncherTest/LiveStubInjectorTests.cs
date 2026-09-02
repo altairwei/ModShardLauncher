@@ -1,5 +1,6 @@
 using ModShardLauncher.HotReload;
 using UndertaleModLib;
+using UndertaleModLib.Decompiler;
 using UndertaleModLib.Models;
 using Xunit;
 
@@ -133,6 +134,63 @@ public class LiveStubInjectorTests : IDisposable
             g => g.ObjectDefinition?.Name?.Content == "o_msl_live");
         Assert.Equal(1, start.GameObjects.Count(
             g => g.ObjectDefinition?.Name?.Content == "o_msl_live"));   // legacy 不重复
+    }
+
+    /// <summary>#19 诊断探针（临时）：GameStart 尾部追加探针——boot 期把 sprite_add 四种
+    /// 路径形态的真实返回值 + working_directory/program_directory 实际值写进 save area 的
+    /// msl_probe_boot.txt（沙箱写恒 save area，外部可读）。判定：文件不存在 = 实例/GameStart
+    /// 从未跑；spr_first=-1 = sprite_add 全败（逐形态结果指出可用形态）；spr_first>=0 而
+    /// report 沉默 = report/校准通道断。分配逻辑必须在探针之前原样保留。</summary>
+    [Fact]
+    public void Inject_GameStartProbe_LandsInOther2()
+    {
+        var data = Load();
+        LiveStubInjector.Inject(data, new LiveQuotas());
+
+        var gs = data.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Other_2");
+        string gml = Decompile(gs, data);
+        Assert.Contains("msl_probe_boot.txt", gml);
+        Assert.Contains("working_directory", gml);
+        Assert.Contains("program_directory", gml);
+        // 探针在分配之后（分配失败也要留下 spr_first=-1 的记录）
+        Assert.True(gml.IndexOf("global.msl_blank_spr_first", StringComparison.Ordinal) >= 0
+            && gml.IndexOf("global.msl_blank_spr_first", StringComparison.Ordinal)
+               < gml.IndexOf("msl_probe_boot.txt", StringComparison.Ordinal),
+            "探针必须排在分配逻辑之后");
+    }
+
+    /// <summary>manager 事件内容自愈：EnsureEvent 的存在性幂等会让增量 patch 流上的
+    /// 历史产物永远留住旧 GML（探针这类修订落不了盘）——manager 的 Step/GameStart 承载
+    /// 运行语义，必须按当前常量原地重编译。模拟：先把 GameStart 打回无探针旧版，再注入。</summary>
+    [Fact]
+    public void Inject_HealsStaleManagerEventGml()
+    {
+        var data = Load();
+        var q = new LiveQuotas();
+        LiveStubInjector.Inject(data, q);
+
+        var manager = data.GameObjects.First(o => o.Name.Content == "o_msl_live");
+        var ev = manager.Events[(int)EventType.Other]
+            .First(e => e.EventSubtype == (uint)EventSubtypeOther.GameStart);
+        ev.Actions[0].CodeId.ReplaceGML(
+            "global.msl_blank_spr_first = -1;\nglobal.msl_blank_path_first = -1;", data);
+        Assert.DoesNotContain("msl_probe_boot.txt", Decompile(ev.Actions[0].CodeId, data));
+
+        LiveStubInjector.Inject(data, q);   // 再注入 = 内容自愈
+
+        Assert.Contains("msl_probe_boot.txt", Decompile(ev.Actions[0].CodeId, data));
+        // Step 同约：陈旧 Step（缺 apply 调用）也必须被当前常量替换
+        var stepEv = manager.Events[(int)EventType.Step].First(e => e.EventSubtype == 0);
+        stepEv.Actions[0].CodeId.ReplaceGML("return 0;", data);
+        LiveStubInjector.Inject(data, q);
+        Assert.Contains(stepEv.Actions[0].CodeId.Instructions,
+            i => i.Function?.Target?.Name?.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
+    }
+
+    static string Decompile(UndertaleCode code, UndertaleData data)
+    {
+        var ctx = new GlobalDecompileContext(data, false);
+        return Decompiler.Decompile(code, ctx);
     }
 
     /// <summary>dummy stub（"function X() { return 0; }"）的编译形态钉版：Task 14 的

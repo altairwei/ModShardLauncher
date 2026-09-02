@@ -47,8 +47,8 @@ public static class LiveStubInjector
         EnsureString(data, ".png");
 
         var manager = EnsureManager(data);
-        EnsureEvent(manager, EventType.Step, 0, StepEventGml);
-        EnsureEvent(manager, EventType.Other, (uint)EventSubtypeOther.GameStart,
+        EnsureEventContent(manager, EventType.Step, 0, StepEventGml);
+        EnsureEventContent(manager, EventType.Other, (uint)EventSubtypeOther.GameStart,
             GameStartGml(quotas.BlankSprites, quotas.BlankPaths));
         EnsureManagerInstance(data, manager);
 
@@ -127,6 +127,23 @@ public static class LiveStubInjector
         Msl.AddNewEvent(obj, gml, type, sub);
     }
 
+    /// <summary>manager 事件 = 内容寻址（Step/GameStart 承载运行语义，与 shell 静态垫片不同）：
+    /// 存在即按当前常量原地重编译——EnsureEvent 的存在性幂等会让增量 patch 流上的历史产物
+    /// 永远留住旧 GML（#19 探针这类修订将落不了盘）。结构残缺（无 action/code）→ 摘除重建。</summary>
+    static void EnsureEventContent(UndertaleGameObject obj, EventType type, uint sub, string gml)
+    {
+        var ev = obj.Events[(int)type].FirstOrDefault(e => e.EventSubtype == sub);
+        if (ev == null) { Msl.AddNewEvent(obj, gml, type, sub); return; }
+        var code = ev.Actions.FirstOrDefault()?.CodeId;
+        if (code == null)
+        {
+            obj.Events[(int)type].Remove(ev);
+            Msl.AddNewEvent(obj, gml, type, sub);
+            return;
+        }
+        code.ReplaceGML(gml, ModLoader.Data);
+    }
+
     static void EnsureManagerInstance(UndertaleData data, UndertaleGameObject manager)
     {
         var start = data.Rooms.First(t => t.Name.Content == "START");
@@ -171,5 +188,34 @@ public static class LiveStubInjector
         "    var _p = path_add();\n" +
         "    if (global.msl_blank_path_first < 0) global.msl_blank_path_first = _p;\n" +
         "    global.msl_blank_path_count += 1;\n" +
-        "}";
+        "}\n" +
+        GameStartProbeGml;
+
+    /// <summary>#19 诊断探针（临时，#19 闭环后移除）：接在分配逻辑之后——boot 期把
+    /// working_directory/program_directory 实际值、两个 first 全局、以及 sprite_add 四种
+    /// 路径形态（裸相对 / working_directory 前缀 / program_directory 前缀 / 正斜杠绝对）的
+    /// 真实返回值写进 msl_probe_boot.txt（沙箱写恒 save area = %LOCALAPPDATA%\StoneShard，
+    /// 外部可读；若未沙箱化则落 exe 目录，两处都查）。判定：文件不存在 = 实例/GameStart
+    /// 从未跑；spr_first=-1 = sprite_add 全败（逐形态返回值指出可用形态）；spr_first>=0 而
+    /// report 沉默 = report/校准通道断。GML 串面零转义（writeln 换行、纯正斜杠路径），
+    /// 避开编译器转义处理的不确定面。探针追加的 _f 局部不违反任何钉版：Other_2 不在
+    /// 垫片矩阵内（Step boot=1 精确容量不许动，Other_2 无交换面契约）。</summary>
+    const string GameStartProbeGml =
+        "var _f = file_text_open_write(\"msl_probe_boot.txt\");\n" +
+        "file_text_write_string(_f, \"wd=\" + working_directory);\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"pd=\" + program_directory);\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"spr_first=\" + string(global.msl_blank_spr_first));\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"path_first=\" + string(global.msl_blank_path_first));\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"rel=\" + string(sprite_add(\"mods/_live/res/_blank.png\", 1, false, false, 0, 0)));\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"wdrel=\" + string(sprite_add(working_directory + \"mods/_live/res/_blank.png\", 1, false, false, 0, 0)));\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"pdrel=\" + string(sprite_add(program_directory + \"mods/_live/res/_blank.png\", 1, false, false, 0, 0)));\n" +
+        "file_text_writeln(_f);\n" +
+        "file_text_write_string(_f, \"absfwd=\" + string(sprite_add(\"E:/SteamLibrary/steamapps/common/Stoneshard/mods/_live/res/_blank.png\", 1, false, false, 0, 0)));\n" +
+        "file_text_close(_f);";
 }
