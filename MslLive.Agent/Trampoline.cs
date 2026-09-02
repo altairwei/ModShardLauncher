@@ -88,7 +88,12 @@ public static class Trampoline
             sems.Add(new SemInstruction
             {
                 Kind = BcEncoder.OpPush, T1 = BcEncoder.TVariable,
-                Inst = -9 /* InstanceType.Arg（vanilla [5] 实证：字 F7 FF 05 C0） */,
+                // #20 定案：argument0 读 = Arg 域 -15（字 F1 FF 05 C0）——真源 = 同编译管线
+                // TW 脚本逐字节实证（argdump）+ runtime handler Arg 分支（argIndex=id−93，
+                // operand 0x5D=builtin 93 不变）。曾被误读 vanilla 扫描改成 -9（Stacktop，
+                // F7 FF）——trampoline 帧无 with 栈，实例搜索落空抛 "Unable to find
+                // instance for object index 0" → 错误格式化器撞帧断言 int3（#20 崩溃链）。
+                Inst = -15 /* InstanceType.Arg */,
                 Var = "argument0", RefTop = 0xA0,
             });
         sems.Add(new SemInstruction { Kind = BcEncoder.OpCall, T1 = BcEncoder.TInt32, Low16 = (ushort)(withArg ? 1 : 0), Fn = name });

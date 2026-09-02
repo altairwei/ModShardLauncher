@@ -52,12 +52,14 @@ public class TrampolineTests : IDisposable
     };
 
     /// <summary>report trampoline（36B）：[exit 4B @0][push.v argument0 + call.v #901(argc=1) +
-    /// popz.v + return-0 收尾 @4]。argument0 指令字 F7 FF 05 C0 = TypeInst Arg(-9)
-    /// （vanilla [5] 实证；旧 -15 是 F1 FF…）；操作数 5D 00 00 A0 = builtin 93 | RefTop 0xA0。</summary>
+    /// popz.v + return-0 收尾 @4]。argument0 指令字 F1 FF 05 C0 = TypeInst Arg(-15)
+    /// （#20 定案：编译器对 argument0 的编码真源 = 同管线 TW 脚本逐字节实证 + runtime
+    /// handler Arg 分支 argIndex=id−93 吻合；旧 -9=F7 FF 是 stacktop 实例读，真机撞
+    /// "Unable to find instance for object index 0"）；操作数 5D 00 00 A0 = builtin 93 | RefTop 0xA0。</summary>
     static readonly byte[] ReportTrampoline =
     {
         0x00, 0x00, 0x02, 0x9D,                           // exit.i
-        0xF7, 0xFF, 0x05, 0xC0, 0x5D, 0x00, 0x00, 0xA0,   // push.v argument0（inst=-9，builtin 93）
+        0xF1, 0xFF, 0x05, 0xC0, 0x5D, 0x00, 0x00, 0xA0,   // push.v argument0（inst=-15 Arg，builtin 93）
         0x01, 0x00, 0x02, 0xD9, 0x85, 0x03, 0x00, 0x00,   // call.v msl_live_report argc=1 → 注册表 901
         0x00, 0x00, 0x05, 0x9E,                           // popz.v
         0x00, 0x00, 0x0F, 0x84, 0x00, 0x00, 0x52, 0x07, 0x00, 0x00, 0x05, 0x9C,
