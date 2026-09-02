@@ -187,6 +187,26 @@ public class LiveStubInjectorTests : IDisposable
             i => i.Function?.Target?.Name?.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
     }
 
+    /// <summary>#19 诊断（C1 判别，临时）：Step 首帧写 msl_probe_step.txt 进 save area——
+    /// 零新增局部（句柄走 global 不走 var，LocalsCount=1 精确容量钉版不动）。三分支定案：
+    /// step 文件缺席 = 实例事件面断；step 在 + agent「report entry」缺席 = report 调用面断；
+    /// entry 在 + cand 无 4D = 校准面断。</summary>
+    [Fact]
+    public void Inject_StepProbe_MarksFirstFrame_WithoutNewLocals()
+    {
+        var data = Load();
+        LiveStubInjector.Inject(data, new LiveQuotas());
+
+        var step = data.Code.First(c => c.Name.Content == LiveStubInjector.ManagerStepEntry);
+        string gml = Decompile(step, data);
+        Assert.Contains("msl_probe_step.txt", gml);
+        Assert.Contains("msl_probe_step", gml);   // variable_global_exists 守卫
+        Assert.Equal(1u, step.LocalsCount);       // 精确容量契约不变（钉版同 Inject_PadMatrix）
+        // apply 轮询仍在（探针是前缀，不是替换）
+        Assert.Contains(step.Instructions,
+            i => i.Function?.Target?.Name?.Content == "gml_Script_" + LiveStubInjector.ApplyFn);
+    }
+
     static string Decompile(UndertaleCode code, UndertaleData data)
     {
         var ctx = new GlobalDecompileContext(data, false);

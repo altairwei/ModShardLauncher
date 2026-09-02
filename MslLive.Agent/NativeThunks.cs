@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace MslLive.Agent;
 
@@ -53,11 +54,26 @@ public static class NativeRegistration
 public static class ReportCalibration
 {
     static int lockedOffset = -1;
+    static bool failed, entryLogged;
     public static bool Ready { get; private set; }
 
     public static unsafe void OnReport(void* args, int argc)
     {
-        if (Ready || args == null || argc < 1) return;
+        if (Ready || failed) return;
+        // #19 诊断（真机 11:03 全沉默实证）：旧版 args==null/argc<1 早退与「report 从未
+        // 进入」在 agent.log 上不可区分——入口证据打在最前面（首调用一条，闩锁防每帧
+        // 刷屏），候选窗原始 hex 一次抓全：真机据此判别 调用面断（零 entry 行） vs
+        // 校准面断（entry 行里没有一个 4Dxxxxxx）。
+        if (!entryLogged)
+        {
+            entryLogged = true;
+            var sb = new StringBuilder();
+            if (args == null) sb.Append("<null>");
+            else foreach (int off in new[] { 0, 4, 8, 12, 16, 24 })
+                sb.Append(off).Append(':').Append((*(uint*)((byte*)args + off)).ToString("X8")).Append(' ');
+            AgentState.Log($"report entry: args=0x{(ulong)args:X} argc={argc} cand[{sb}]");
+        }
+        if (args == null || argc < 1) return;
         foreach (int off in new[] { 0, 8, 4, 16 })
         {
             uint v = *(uint*)((byte*)args + off);
@@ -70,8 +86,11 @@ public static class ReportCalibration
                 return;
             }
         }
-        AgentState.Fail("report calibration failed: no offset matched tag $4D");
+        // Fail 闩锁：gate 常开后旧版每帧 Fail 会以 60 行/秒刷爆 agent.log。
+        // fail-closed 语义不变（Blanks 永 -1 → MSL 拒会话），详见 entry 行。
+        failed = true;
+        AgentState.Fail("report calibration failed: no offset matched tag $4D (see report entry line)");
     }
 
-    internal static void ResetForTest() { lockedOffset = -1; Ready = false; }
+    internal static void ResetForTest() { lockedOffset = -1; Ready = false; failed = false; entryLogged = false; }
 }

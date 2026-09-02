@@ -166,8 +166,18 @@ public static class LiveStubInjector
     /// trampoline 在 pipe 握手时才安装（Task 14），GameStart 一定早于握手，那里的调用
     /// 只会命中 dummy；Step 每帧轮询保证握手后下一帧即上报，native 侧首次收到后忽略后续。
     /// 上报参数打包：$4D000000 | (spriteFirst &lt;&lt; 8) | pathFirst——高字节固定 tag $4D
-    /// 供 agent 做 RValue 偏移自校准（Task 13），spriteFirst &lt; 65536、pathFirst &lt; 256 无碰撞。</summary>
+    /// 供 agent 做 RValue 偏移自校准（Task 13），spriteFirst &lt; 65536、pathFirst &lt; 256 无碰撞。
+    /// #19 诊断前缀（临时，#19 闭环后移除）：首帧写 msl_probe_step.txt 进 save area——
+    /// 零新增局部（句柄走 global 不走 var，LocalsCount=1 精确容量钉版不动），文件存在
+    /// ⟹ Step 在跑（GameStart 探针已证 GameStart 跑 ≠ Step 跑，C1/C2/C3 三分支判别件）。</summary>
     public const string StepEventGml =
+        "if (!variable_global_exists(\"msl_probe_step\"))\n" +
+        "{\n" +
+        "    global.msl_probe_step = 1;\n" +
+        "    global.msl_probe_h = file_text_open_write(\"msl_probe_step.txt\");\n" +
+        "    file_text_write_string(global.msl_probe_h, \"step alive spr=\" + string(global.msl_blank_spr_first) + \" path=\" + string(global.msl_blank_path_first));\n" +
+        "    file_text_close(global.msl_probe_h);\n" +
+        "}\n" +
         "msl_live_apply();\n" +
         "if (global.msl_blank_spr_first >= 0 && global.msl_blank_path_first >= 0)\n" +
         "    msl_live_report($4D000000 | (global.msl_blank_spr_first << 8) | global.msl_blank_path_first);";
