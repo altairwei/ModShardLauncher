@@ -26,6 +26,7 @@ public static unsafe class Boot
         try
         {
             AgentState.Init(args);
+            CrashCapture.Install();   // #20 取证：尽早武装，boot 期崩溃也要能抓到
             PipeServer.Start();
             return 0;
         }

@@ -129,6 +129,10 @@ public static class NodeIndex
 
     public static bool TryGet(string name, out NodeInfo info) => Volatile.Read(ref byName).TryGetValue(name, out info!);
     public static IEnumerable<NodeInfo> All => Volatile.Read(ref byName).Values;
+
+    /// <summary>#20 取证：崩溃转储按 record+0x20 表指针反查脚本名用（快照字典只读遍历，
+    /// 键=名）。与 All 同源，只是带出名字。</summary>
+    internal static IEnumerable<KeyValuePair<string, NodeInfo>> AllNamed => Volatile.Read(ref byName);
     public static int Count => Volatile.Read(ref byName).Count;
 
     internal static void ResetForTest()
