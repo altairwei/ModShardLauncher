@@ -43,7 +43,12 @@ public static class NodeIndex
     /// fix-loop #10：该时刻执行节点尚未创建（见上）——构建带重试直到达 MinNodes 门槛；
     /// 重试期间是瞬态（hello 报 "node index building"，不进 Fail 累积），只有耗尽放弃才
     /// Fail（构建线程是唯一知道总数的地方，护栏在这报）。就算慢，握手路径也没人等它——
-    /// hello 每连接快照现状（PipeServer.Handle）。</summary>
+    /// hello 每连接快照现状（PipeServer.Handle）。
+    /// fix-loop #24：默认轮走 probe 门控扫描（Mem.ScanQwordProbed——扫描量 3.5GB→~20MB，
+    /// 不再逐出工作集，单轮秒级）。快扫后「达标」不再隐含绑定装载完成（老代码每轮
+    /// ~20min 扫描天然等到装载完），成功门加稳定性条件：达标且计数与上一轮相等；
+    /// 平台期（连续两轮等计数且未达标）疑似门控漏区 → 恰一次全扫兜底（老行为保
+    /// 正确性，22min/轮绝不重复），最优快照守护保证全扫结果不被更差的门控快照覆盖。</summary>
     public static void BeginBuild()
     {
         lock (startLock)
@@ -54,13 +59,18 @@ public static class NodeIndex
         new Thread(() =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            int prev = -1;          // 上一轮计数（稳定性门的参照）
+            int plateau = 0;        // 未达标连续等计数轮数（平台期 → 疑似门控漏区）
+            bool fullUsed = false;  // 全扫兜底只跑一次
+            int best = -1;          // 最优快照守护：更差的快照不得覆盖更好的
             for (int attempt = 1; ; attempt++)
             {
-                int nodes;
+                bool full = !fullUsed && plateau >= 2;
                 var t = System.Diagnostics.Stopwatch.StartNew();
+                Dictionary<string, NodeInfo> fresh;
                 try
                 {
-                    nodes = Build();
+                    fresh = BuildCore(full);
                 }
                 catch (Exception ex)
                 {
@@ -68,12 +78,25 @@ public static class NodeIndex
                     AgentState.Log("node index build failed: " + ex);
                     break;
                 }
-                if (nodes >= MinNodes)
+                int nodes = fresh.Count;
+                if (nodes > best)
                 {
-                    AgentState.Log($"node index built: {nodes} nodes in {sw.ElapsedMilliseconds}ms (attempt {attempt})");
+                    best = nodes;
+                    Volatile.Write(ref byName, fresh);
+                }
+                string mode = full ? "full" : $"gated, regions {Mem.LastProbe.Hitted}/{Mem.LastProbe.Probed}";
+                // 成功门：达标且 (本轮为全扫 || 计数与上一轮相等)。全扫可信——它只在
+                // 两轮平台期之后发生，装载已静默；门控轮必须等计数稳定（31K 抢跑收工
+                // 会缺尾批绑定，#11 真机：31K→34724 仍在涨）。
+                if (nodes >= MinNodes && (full || nodes == prev))
+                {
+                    AgentState.Log($"node index built: {nodes} nodes in {sw.ElapsedMilliseconds}ms (attempt {attempt}, {mode})");
                     break;
                 }
-                AgentState.Log($"node index attempt {attempt}: {nodes} nodes in {t.ElapsedMilliseconds}ms, retrying in {RetryIntervalMs}ms");
+                plateau = nodes < MinNodes && nodes == prev ? plateau + 1 : 0;
+                if (full) fullUsed = true;
+                prev = nodes;
+                AgentState.Log($"node index attempt {attempt}: {nodes} nodes in {t.ElapsedMilliseconds}ms ({mode}), retrying in {RetryIntervalMs}ms");
                 if (attempt >= RetryMaxAttempts)
                 {
                     AgentState.Fail($"node index too small ({nodes})");
@@ -101,14 +124,29 @@ public static class NodeIndex
     /// record+0x00==ExecVtable → +0x80 名字可打印（≤NodeNameMax）→ 收录。</summary>
     public static int Build()
     {
-        BuildDelayHook?.Invoke();
-        var fresh = new Dictionary<string, NodeInfo>();
-        if (AgentState.NodeSigFn != 0)   // 0 永不可能是签名 VA（扫描全零 qword 会爆量）
-            foreach (var hit in Mem.ScanQword(AgentState.NodeSigFn))
-                if (TryValidate(hit, out string name, out var info))
-                    fresh[name] = info;
+        var fresh = BuildCore(full: false);
         Volatile.Write(ref byName, fresh);
         return fresh.Count;
+    }
+
+    /// <summary>门控全扫计数（测试断言「兜底恰一次」用；ResetForTest 复位）。</summary>
+    internal static int FullScans;
+
+    /// <summary>构建一份快照字典（不换入，调用方决定）。full=false 走 probe 门控扫描
+    /// （fix-loop #24；TestMap 单区段 ≤ 探针窗时门控与全扫等价——现有用例行为不变）。</summary>
+    static Dictionary<string, NodeInfo> BuildCore(bool full)
+    {
+        BuildDelayHook?.Invoke();
+        if (full) FullScans++;
+        var fresh = new Dictionary<string, NodeInfo>();
+        if (AgentState.NodeSigFn != 0)   // 0 永不可能是签名 VA（扫描全零 qword 会爆量）
+        {
+            var hits = full ? Mem.ScanQword(AgentState.NodeSigFn) : Mem.ScanQwordProbed(AgentState.NodeSigFn);
+            foreach (var hit in hits)
+                if (TryValidate(hit, out string name, out var info))
+                    fresh[name] = info;
+        }
+        return fresh;
     }
 
     /// <summary>单点验证（测试经 Mem.TestMap 注入合成节点直接调它）。</summary>
@@ -143,5 +181,6 @@ public static class NodeIndex
         MinNodes = 30000;
         RetryMaxAttempts = 60;
         RetryIntervalMs = 5000;
+        FullScans = 0;
     }
 }

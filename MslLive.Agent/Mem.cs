@@ -30,11 +30,19 @@ public static unsafe class Mem
 
     internal static byte[]? TestMap;
     internal static ulong TestBase;
+    /// <summary>测试缝（fix-loop #24）：非空时替代「整张 TestMap 一个区段」——注入
+    /// 多区段形态（TestMap 仍是内容后端，区段是它的子区间，基址可高于 TestBase）。</summary>
+    internal static List<(ulong Base, ulong Size)>? TestRegions;
 
     /// <summary>MEM_COMMIT ∧ MEM_PRIVATE ∧ (READWRITE|EXECUTE_READWRITE) ∧ !GUARD 的区域枚举。</summary>
     public static IEnumerable<(ulong Base, ulong Size)> Regions()
     {
-        if (TestMap != null) { yield return (TestBase, (ulong)TestMap.LongLength); yield break; }
+        if (TestMap != null)
+        {
+            if (TestRegions != null) { foreach (var r in TestRegions) yield return r; }
+            else yield return (TestBase, (ulong)TestMap.LongLength);
+            yield break;
+        }
         ulong addr = 0;
         while (VirtualQuery(addr, out var m, MbiSize) != 0)
         {
@@ -47,25 +55,72 @@ public static unsafe class Mem
         }
     }
 
-    /// <summary>8 对齐 qword 值扫描（NodeIndex 的 NodeSigFn 撒网）。
+    /// <summary>单区段 qword 扫描（hits=null 时只计数——探针模式免命中列表开销）。
+    /// TestMap 模式按绝对地址索引（区段基址可高于 TestBase——TestRegions 缝）。</summary>
+    static int ScanRange(ulong b, ulong size, ulong value, List<ulong>? hits)
+    {
+        int count = 0;
+        if (TestMap != null)   // 合成内存：扫数组，别把假基址当真指针解引用
+        {
+            long n = TestMap.LongLength;
+            long start = (long)(b - TestBase);
+            long end = start + (long)size;
+            if (start < 0) start = 0;
+            if (end > n) end = n;   // 防御：缝配置越出数组尾（错配测试不该崩）
+            for (long i = start; i + 8 <= end; i += 8)
+                if (BitConverter.ToUInt64(TestMap, (int)i) == value)
+                {
+                    count++;
+                    hits?.Add(TestBase + (ulong)i);
+                }
+            return count;
+        }
+        byte* p = (byte*)b;
+        for (ulong off = 0; off + 8 <= size; off += 8)
+            if (*(ulong*)(p + off) == value)
+            {
+                count++;
+                hits?.Add(b + off);
+            }
+        return count;
+    }
+
+    /// <summary>8 对齐 qword 全量值扫描（NodeIndex 全扫兜底 / 测试直扫）。
     /// 非常规返回 List 而非迭代器：unsafe 指针在迭代器方法里要 C#13，net6 默认 C#10。</summary>
     public static List<ulong> ScanQword(ulong value)
     {
         var hits = new List<ulong>();
         foreach (var (b, size) in Regions())
+            ScanRange(b, size, value, hits);
+        return hits;
+    }
+
+    /// <summary>探针窗：#11 离线 dump 实证节点区段每 16KB 页 ~16 节点均匀密度 →
+    /// 区段头 16KB 必含 SIG。</summary>
+    public const ulong ProbeWindow = 0x4000;
+
+    /// <summary>最近一次 ScanQwordProbed 的区段统计（Probed 探测/Hitted 命中）——
+    /// agent.log 的门控证据源（真机预期 ~19 命中 / 数百探测）。</summary>
+    internal static (int Probed, int Hitted) LastProbe;
+
+    /// <summary>fix-loop #24 probe 门控扫描：每区段先扫头 ProbeWindow 探针，含 value
+    /// 才全扫该区段。22min 索引的真根因不是扫描带宽——全量扫描把游戏 3.3GB 工作集
+    /// 逐出，之后 38K 命中 × ~7 次散读全吃 ~4ms 硬页错误（#9 真机实测 26min43s）。
+    /// #11 dump 量化：节点聚 19 区段 ~20MB → 门控扫描量 3.5GB → ~20MB，工作集不动，
+    /// 单轮秒级。探针漏区（SIG 深埋 >16KB）由 NodeIndex 平台期全扫兜底。</summary>
+    public static List<ulong> ScanQwordProbed(ulong value)
+    {
+        var hits = new List<ulong>();
+        int probed = 0, hitted = 0;
+        foreach (var (b, size) in Regions())
         {
-            if (TestMap != null)   // 合成内存：扫数组，别把假基址当真指针解引用
-            {
-                for (ulong off = 0; off + 8 <= size; off += 8)
-                    if (BitConverter.ToUInt64(TestMap, (int)off) == value)
-                        hits.Add(b + off);
-                continue;
-            }
-            byte* p = (byte*)b;
-            for (ulong off = 0; off + 8 <= size; off += 8)
-                if (*(ulong*)(p + off) == value)
-                    hits.Add(b + off);
+            probed++;
+            ulong window = size < ProbeWindow ? size : ProbeWindow;
+            if (ScanRange(b, window, value, null) == 0) continue;
+            hitted++;
+            ScanRange(b, size, value, hits);
         }
+        LastProbe = (probed, hitted);
         return hits;
     }
 
@@ -78,21 +133,26 @@ public static unsafe class Mem
         {
             if (TestMap != null)
             {
-                for (ulong off = 0; off + (ulong)pattern.Length <= size; off++)
+                long n = TestMap.LongLength;
+                long start = (long)(b - TestBase);
+                long end = start + (long)size;
+                if (start < 0) start = 0;
+                if (end > n) end = n;   // TestRegions 缝下按绝对地址索引（同 ScanRange）
+                for (long i = start; i + pattern.Length <= end; i++)
                 {
-                    int i = 0;
-                    while (i < pattern.Length && (pattern[i] == null || TestMap[off + (ulong)i] == pattern[i]!.Value)) i++;
-                    if (i == pattern.Length) hits.Add(b + off);
+                    int k = 0;
+                    while (k < pattern.Length && (pattern[k] == null || TestMap[i + k] == pattern[k]!.Value)) k++;
+                    if (k == pattern.Length) hits.Add(TestBase + (ulong)i);
                 }
                 continue;
             }
             byte* p = (byte*)b;
-            int n = pattern.Length;
-            for (ulong off = 0; off + (ulong)n <= size; off++)
+            int np = pattern.Length;
+            for (ulong off = 0; off + (ulong)np <= size; off++)
             {
                 int i = 0;
-                while (i < n && (pattern[i] == null || p[off + (ulong)i] == pattern[i]!.Value)) i++;
-                if (i == n) hits.Add(b + off);
+                while (i < np && (pattern[i] == null || p[off + (ulong)i] == pattern[i]!.Value)) i++;
+                if (i == np) hits.Add(b + off);
             }
         }
         return hits;
@@ -123,18 +183,33 @@ public static unsafe class Mem
     }
 
     /// <summary>读 NUL 结尾字符串；max 内无 NUL 则取满 max（注册表内联名恰占满 0x40 的实测形态）。
-    /// 不可读 → ""。</summary>
+    /// 不可读 → ""。fix-loop #24：原实现每字节一次 Readable（=一次 VirtualQuery 系统调用）——
+    /// 34,724 节点 × ~30 字符名是百万次级调用；改为一次查界（可读区段尾 / addr+max 钳制）
+    /// 后连续读到 NUL / 界为止，语义与旧「首不可读字节停」同界。</summary>
     public static string ReadCString(ulong addr, int max)
     {
-        if (addr == 0 || !Readable(addr, 1)) return "";
+        if (addr == 0) return "";
+        ulong limit;   // 独占上界
+        if (TestMap != null)
+        {
+            if (addr < TestBase) return "";
+            limit = TestBase + (ulong)TestMap.LongLength;
+        }
+        else
+        {
+            if (VirtualQuery(addr, out var m, MbiSize) == 0 || m.State != MEM_COMMIT ||
+                (m.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return "";
+            limit = m.BaseAddress + m.RegionSize;
+        }
+        ulong capped = addr + (ulong)max;
+        if (capped < limit) limit = capped;
         var buf = new byte[max];
         int n = 0;
-        while (n < max)
+        for (ulong a = addr; a < limit && n < max; a++, n++)
         {
-            if (!Readable(addr + (ulong)n, 1)) break;
-            byte c = TestMap != null ? TestMap[addr - TestBase + (ulong)n] : *(byte*)(addr + (ulong)n);
+            byte c = TestMap != null ? TestMap[(int)(a - TestBase)] : *(byte*)a;
             if (c == 0) break;
-            buf[n++] = c;
+            buf[n] = c;
         }
         return Encoding.ASCII.GetString(buf, 0, n);
     }

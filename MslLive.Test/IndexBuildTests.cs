@@ -13,7 +13,9 @@ namespace MslLive.Test;
 /// fix-loop #10 追加：OnInitGML 注册器时刻（+0.5s）执行节点尚未创建（真机两次实测
 /// 0 nodes/75ms）——节点是 data.win 装载绑定（注册器之后）才批量出现。构建线程
 /// 带有界重试（MinNodes 门槛 + RetryMaxAttempts/RetryIntervalMs，seam 可调），
-/// 重试期间不 Fail（瞬态），只有耗尽放弃才 Fail。</summary>
+/// 重试期间不 Fail（瞬态），只有耗尽放弃才 Fail。
+/// fix-loop #24 追加：默认轮 probe 门控扫描 + 稳定性成功门（达标须等计数确认）+
+/// 平台期恰一次全扫兜底——22min → 预期秒级/轮。</summary>
 public class IndexBuildTests : IDisposable
 {
     const ulong SIG = 0x1406BE508;      // 与 NodeValidationTests 同形（扫描靶值）
@@ -34,6 +36,8 @@ public class IndexBuildTests : IDisposable
         NodeIndex.BuildDelayHook = null;
         NodeIndex.ResetForTest();
         Mem.TestMap = null;
+        Mem.TestRegions = null;
+        Mem.LastProbe = default;
         AgentState.NodeSigFn = AgentState.ExecVtable = 0;
     }
 
@@ -55,6 +59,8 @@ public class IndexBuildTests : IDisposable
     {
         PlantNode(0x10100, 0x10C00, "test_entry");
         NodeIndex.MinNodes = 1;                       // 本用例只测后台 + 快照换入，不测规模护栏
+        NodeIndex.RetryIntervalMs = 100;              // #24 稳定性门：成功须第二轮确认等计数——
+                                                      // 5s 默认间隔会把确认轮推出 WaitReady 窗口
         NodeIndex.BuildDelayHook = () => Thread.Sleep(400);
         Assert.False(NodeIndex.Ready);
         NodeIndex.BeginBuild();
@@ -135,5 +141,97 @@ public class IndexBuildTests : IDisposable
         PlantNode(0x10100, 0x10C00, name);
         Assert.Equal(1, NodeIndex.Build());
         Assert.True(NodeIndex.TryGet(name, out _));  // 全名（非 128 前缀）必须可查
+    }
+
+    // ---- fix-loop #24：probe 门控扫描（22min 索引的真根因不是扫描带宽，是全量扫描把
+    // 游戏 3.3GB 工作集逐出 → 之后 38K 命中 × ~7 次散读全吃 ~4ms 硬页错误。#11 离线
+    // dump：命中节点聚 19 区段 ~20MB、每 16KB 页 ~16 节点均匀密度 → 区段头 16KB 探针
+    // 必命中。门控把扫描量 3.5GB → ~20MB，工作集不动 → 秒级）。----
+
+    [Fact]
+    public void ScanQwordProbed_OnlyScansRegionsWhoseProbeHits()
+    {
+        Mem.TestMap = new byte[0x8000];
+        Mem.TestRegions = new List<(ulong, ulong)> { (Base, 0x4000), (Base + 0x4000, 0x4000) };
+        W64(Base + 0x4000, SIG);                     // SIG 只在第二区段头
+        W64(Base + 0x4010, 0xDEADBEEFUL);            // 同段第二 qword（非 SIG）——整段扫也只 1 命中
+        var hits = Mem.ScanQwordProbed(SIG);
+        var hit = Assert.Single(hits);
+        Assert.Equal(Base + 0x4000, hit);            // 区段一（探针无 SIG）整段跳过；命中全在区段二
+        Assert.Equal((2, 1), Mem.LastProbe);         // 日志证据源：探测 2 段、命中 1 段
+    }
+
+    /// <summary>探针窗语义钉版：SIG 深埋区段头 16KB 之外 → 门控扫不到（by design——
+    /// 均匀密度下不该发生；万一发生由 NodeIndex 平台期全扫兜底，见下一用例）。</summary>
+    [Fact]
+    public void ScanQwordProbed_SkipsSigBeyondProbeWindow_FullScanFindsIt()
+    {
+        Mem.TestMap = new byte[0x8000];              // 32KB：SIG 深埋 0x5000（>16KB 探针窗）
+        W64(Base + 0x5000, SIG);
+        Assert.Empty(Mem.ScanQwordProbed(SIG));      // 探针窗（头 16KB）无 SIG → 整段跳过
+        var hit = Assert.Single(Mem.ScanQword(SIG)); // 全扫（兜底路径的原语）找得到
+        Assert.Equal(Base + 0x5000, hit);
+    }
+
+    [Fact]
+    public void Build_GatedScan_FindsNodesInProbeHitRegions()
+    {
+        Mem.TestMap = new byte[0x8000];
+        Mem.TestRegions = new List<(ulong, ulong)> { (Base, 0x4000), (Base + 0x4000, 0x4000) };
+        PlantNode(Base + 0x4000 + 0x40, Base + 0x6000, "second_region_entry");
+        Assert.Equal(1, NodeIndex.Build());          // Build 走门控：区段二探针命中 → 扫到节点
+        Assert.True(NodeIndex.TryGet("second_region_entry", out _));
+    }
+
+    /// <summary>平台期升级兜底：门控连续两轮等计数且未达标 → 恰一次全扫回退（老 22min
+    /// 行为作正确性保底，不循环烧）。真机对应「门控漏区」场景。</summary>
+    [Fact]
+    public void BeginBuild_GatedPlateau_EscalatesToSingleFullScan()
+    {
+        Mem.TestMap = new byte[0x8000];              // SIG 深埋 0x5000：门控永远扫不到
+        PlantNode(Base + 0x5000, Base + 0x6000, "deep_entry");
+        NodeIndex.MinNodes = 1;
+        NodeIndex.RetryMaxAttempts = 8;
+        NodeIndex.RetryIntervalMs = 1;
+        NodeIndex.BeginBuild();                      // 轮 1-3 门控 0 节点 → 平台期计数到 2 → 轮 4 全扫
+        Assert.True(NodeIndex.WaitReady(5000));
+        Assert.True(NodeIndex.TryGet("deep_entry", out _));   // 全扫兜底找到了
+        Assert.Equal(1, NodeIndex.FullScans);                 // 恰一次全扫（22min/轮，绝不重复）
+        Assert.Equal("ok", AgentState.Status);
+    }
+
+    /// <summary>#24 稳定性成功门：门控快扫后「达标」不再隐含绑定装载完成（老代码靠每轮
+    /// 20min 扫描天然等到装载完）。计数爬坡到门槛的那一轮不能收工——还须一轮等计数
+    /// 确认装载静默，否则 31K 抢跑收工会缺尾批绑定（#11 真机：31K→34724 仍在涨）。</summary>
+    [Fact]
+    public void BeginBuild_WaitsForStableCount_BeforeSuccess()
+    {
+        int calls = 0, grown = 0;
+        NodeIndex.BuildDelayHook = () =>
+        {
+            calls++;
+            if (grown >= 3) return;                  // 第 3 个节点后装载「静默」
+            grown++;
+            PlantNode(0x10100 + (ulong)grown * 0x100, 0x10C00 + (ulong)grown * 0x40, $"entry_{grown}");
+        };
+        NodeIndex.MinNodes = 3;
+        NodeIndex.RetryMaxAttempts = 30;
+        NodeIndex.RetryIntervalMs = 10;
+        NodeIndex.BeginBuild();                      // 计数序列 1,2,3,3——第 3 轮达标但不等前值，第 4 轮才确认
+        Assert.True(NodeIndex.WaitReady(10000));
+        Assert.Equal(4, calls);                      // 成功必须多等一轮（老代码 3 轮即收工 = 本用例红）
+        Assert.Equal(3, NodeIndex.Count);
+        Assert.Equal("ok", AgentState.Status);
+    }
+
+    /// <summary>#24 ReadCString 重写（逐字节 VirtualQuery 查界 → 一次查界连续读）的语义
+    /// 守卫：跨出可读区段尾即停——与旧实现「首不可读字节停」同界。名字故意不写 NUL，
+    /// 钉住「取到界为止、不越界」。</summary>
+    [Fact]
+    public void ReadCString_ClampsAtRegionEnd_WhenNoNulBeforeIt()
+    {
+        string tail = "tail_of_region";
+        Encoding.ASCII.GetBytes(tail).CopyTo(Mem.TestMap!, (int)(0x2000 - tail.Length));
+        Assert.Equal(tail, Mem.ReadCString(Base + 0x2000 - (ulong)tail.Length, 1024));
     }
 }
