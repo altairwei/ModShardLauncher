@@ -18,6 +18,8 @@ public static class DevModeInstaller
         () => System.Diagnostics.Process.GetProcessesByName("StoneShard").Length > 0;
     // fix #28 缝：非空时替代安装位推导（测试进程的 BaseDirectory 不是 MSL 安装位）
     internal static Func<string>? RuntimeDirOverride;
+    // fix #28② 缝：非空时替代进程主模块路径（单文件 BaseDirectory 坑的用例注入）
+    internal static string? MainModuleExePathOverride;
 
     public static bool IsInstalled(string gameDir) =>
         File.Exists(Path.Combine(gameDir, Marker)) && File.Exists(Path.Combine(gameDir, "version.dll"));
@@ -56,7 +58,21 @@ public static class DevModeInstaller
     }
 
     static void TryDelete(string path) { try { File.Delete(path); } catch { } }
-    static string RuntimeDir() => RuntimeDirOverride != null
-        ? RuntimeDirOverride()
-        : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "msllive-runtime");
+    static string RuntimeDir()
+    {
+        if (RuntimeDirOverride != null) return RuntimeDirOverride();
+        // 单文件发布（IncludeAllContentForSelfExtract）下 AppDomain.BaseDirectory 指向
+        // 解包目录 %TEMP%\.net\...（真机 20:31 实证），而 msllive-runtime 是 CopyDevFiles
+        // 的松散侧车、只在 exe 安装位——按进程主模块路径定位（Main ctor 读 mslVersion
+        // 的同款手法），MainModule 拿不到再退回 BaseDirectory
+        try
+        {
+            string? exe = MainModuleExePathOverride ??
+                System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            if (!string.IsNullOrEmpty(exe))
+                return Path.Combine(Path.GetDirectoryName(exe)!, "msllive-runtime");
+        }
+        catch { }
+        return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "msllive-runtime");
+    }
 }

@@ -21,6 +21,7 @@ public class DevModeInstallerTests : IDisposable
     readonly string origDataPath;
     readonly Func<bool> origGameRunning;
     readonly Func<string>? origRuntimeDir;
+    readonly string? origMainModuleExe;
 
     public DevModeInstallerTests()
     {
@@ -37,6 +38,7 @@ public class DevModeInstallerTests : IDisposable
         origDataPath = DataLoader.dataPath;
         origGameRunning = DevModeInstaller.GameRunning;
         origRuntimeDir = DevModeInstaller.RuntimeDirOverride;
+        origMainModuleExe = DevModeInstaller.MainModuleExePathOverride;
     }
 
     public void Dispose()
@@ -46,6 +48,7 @@ public class DevModeInstallerTests : IDisposable
         DataLoader.dataPath = origDataPath;
         DevModeInstaller.GameRunning = origGameRunning;
         DevModeInstaller.RuntimeDirOverride = origRuntimeDir;
+        DevModeInstaller.MainModuleExePathOverride = origMainModuleExe;
         try { Directory.Delete(gameDir, true); } catch { }
         try { Directory.Delete(runtimeDir, true); } catch { }
     }
@@ -190,5 +193,33 @@ public class DevModeInstallerTests : IDisposable
         DevMode.EnsureInstalled();
 
         Assert.False(DevModeInstaller.IsInstalled(gameDir));
+    }
+
+    /// <summary>fix #28②（真机 20:31 形态）：单文件发布（IncludeAllContentForSelfExtract）
+    /// 下 AppDomain.BaseDirectory 指向解包目录 %TEMP%\.net\...，而 msllive-runtime 是
+    /// CopyDevFiles 的松散侧车、只存在于 exe 安装位（D:\Program Files\ModShardLauncher\）。
+    /// RuntimeDir 必须按进程主模块路径定位安装位（Main ctor 读 mslVersion 的同款手法），
+    /// 否则 EnsureInstalled 在真机上必抛「msllive-runtime 不存在」并被吞——组件永远装
+    /// 不上。测试形态：主模块位=gameDir（runtime 造在那），BaseDirectory=测试 bin（无
+    /// runtime）——装上即证明走了主模块位。</summary>
+    [Fact]
+    public void RuntimeDir_ResolvesMainModuleLocation_NotExtractionBaseDir()
+    {
+        Main.Settings.DevMode = true;
+        DataLoader.dataPath = Path.Combine(gameDir, "data.win");
+        DevModeInstaller.GameRunning = () => false;
+        DevModeInstaller.RuntimeDirOverride = null;              // 直测默认路径分支
+        DevModeInstaller.MainModuleExePathOverride = Path.Combine(gameDir, "ModShardLauncher.exe");
+        // runtime 造在「exe 安装位」（真实形态），不在测试 bin——旧实现（BaseDirectory）
+        // 在此必抛 FileNotFoundException，与真机 20:31 逐字同形
+        Directory.CreateDirectory(Path.Combine(gameDir, "msllive-runtime", "msllive"));
+        File.WriteAllBytes(Path.Combine(gameDir, "msllive-runtime", "version.dll"), new byte[] { 0x42 });
+        File.WriteAllText(Path.Combine(gameDir, "msllive-runtime", "msllive", "MslLive.Agent.dll"), "fake agent");
+
+        Assert.False(DevModeInstaller.IsInstalled(gameDir));
+        DevMode.EnsureInstalled();
+
+        Assert.True(DevModeInstaller.IsInstalled(gameDir));
+        Assert.True(File.Exists(Path.Combine(gameDir, "msllive", "MslLive.Agent.dll")));
     }
 }
