@@ -24,4 +24,5 @@
     <sys:String x:Key="VersionDifferentWarningTitle">Версия мода отличается от версии игры</sys:String>
     <sys:String x:Key="VersionDifferentWarning">Версия мода отличается от версии игры, возможно, это вызовет сбой. Вы всё равно хотите загрузить его?</sys:String>
     <sys:String x:Key="ModLostWarning">Файл мода отсутствует</sys:String>
+    <sys:String x:Key="PackFailedWarning">Ошибка упаковки: проверьте ошибки сборки исходников мода. Компиляция пропущена.</sys:String>
 </ResourceDictionary>

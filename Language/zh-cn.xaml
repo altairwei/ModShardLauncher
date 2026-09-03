@@ -30,6 +30,7 @@
     <sys:String x:Key="VersionDifferentWarningTitle">Mod版本与游戏版本不一致</sys:String>
     <sys:String x:Key="VersionDifferentWarning">Mod版本与游戏版本不一致, 如果执意加载可能会崩溃.仍然要加载吗?</sys:String>
     <sys:String x:Key="ModLostWarning">Mod文件丢失</sys:String>
+    <sys:String x:Key="PackFailedWarning">打包失败: mod 源码存在编译错误, 已跳过本次编译.</sys:String>
     <sys:String x:Key="CompileError">编译错误:</sys:String>
     <sys:String x:Key="LoadPath">将此路径保存为默认加载路径?</sys:String>
     <sys:String x:Key="SavePath">将此路径保存为默认保存路径?</sys:String>

@@ -32,6 +32,7 @@
     <sys:String x:Key="VersionDifferentWarningTitle">Mod version is different from game version</sys:String>
     <sys:String x:Key="VersionDifferentWarning">Mod version is different from game version, maybe it will crash if you load it.Still want to load?</sys:String>
     <sys:String x:Key="ModLostWarning">Mod file lost.</sys:String>
+    <sys:String x:Key="PackFailedWarning">Packing failed. Check the mod source for build errors. Compile skipped.</sys:String>
     <sys:String x:Key="CompileError">Compile Error:</sys:String>
     <sys:String x:Key="LoadPath">Save this path as default LoadPath?</sys:String>
     <sys:String x:Key="SavePath">Save this path as default SavePath?</sys:String>
