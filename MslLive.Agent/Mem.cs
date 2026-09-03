@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -18,7 +19,6 @@ public static unsafe class Mem
     }
 
     [DllImport("kernel32.dll")] static extern nuint VirtualQuery(ulong addr, out MemInfo info, nuint len);
-    [DllImport("kernel32.dll")] static extern ulong VirtualAlloc(ulong addr, nuint size, uint type, uint protect);
 
     const uint MEM_COMMIT = 0x1000;
     const uint MEM_PRIVATE = 0x20000;
@@ -288,7 +288,113 @@ public static unsafe class Mem
     internal static readonly Dictionary<ulong, byte[]> TestAllocs = new();
     static ulong nextTestAlloc = 0x7F00_0000_0000;
 
-    /// <summary>分配 RW 内存写入新 buffer（旧 buffer 永不释放——S3 旧帧安全）。0 = 失败。</summary>
+    // ---- fix-loop #27：换入缓冲改走游戏自己的调试堆分配器 ----
+    // 游戏自带带统计的调试堆：DebugAlloc=malloc(size+0x20)、写头（+0x08=size、
+    // +0x0c=0xdeadc0de、+0x10=0xbaadb00b）、返回 raw+0x20。退出遍历的 record 重置
+    // （0x140075fc0：vtable 重置 + free(+0x20 表/+0x28 pcmap) + arena 外的 +0x18 buf 走
+    // 0x140502cbc thunk 进同一机制）会读 buf-0x20 魔术字——裸 VirtualAlloc 缓冲前是
+    // 未提交页必 AV（12:08/13:50/16:36 三例同形 @0x1404CBB74）。用游戏的分配器 =
+    // by construction 可释放（游戏自己的分配/释放是成对的）。
+
+    /// <summary>分配器头写序列（.text 全库唯一，离线实证）：mov [rax+0xc],0xdeadc0de ;
+    /// mov [rax+0x10],0xbaadb00b。按特征不硬编码 VA——游戏更新只挪地址，魔术字与
+    /// .pdata 结构不动。</summary>
+    static readonly byte[] GameAllocAob =
+    {
+        0xC7, 0x40, 0x0C, 0xDE, 0xC0, 0xAD, 0xDE,   // mov [rax+0xc], 0xdeadc0de
+        0xC7, 0x40, 0x10, 0x0B, 0xB0, 0xAD, 0xBA,   // mov [rax+0x10], 0xbaadb00b
+    };
+
+    /// <summary>测试缝（fix #27）：非空时完全替代生产「定位+调用」（TestMap=null 分支）。</summary>
+    internal static Func<byte[], ulong>? GameAllocOverride;
+
+    static readonly object gameAllocGate = new();
+    static ulong gameAllocFn;      // 0 = 未定位或定位失败
+    static bool gameAllocTried;
+
+    /// <summary>映像区段扫描步长：.text 几 MB，分块读（块间重叠 pattern-1 字节、起点归属
+    /// 不重叠——每块只报 start &lt; 步进界的命中，跨界 pattern 由下一块读头的覆盖区接住）。</summary>
+    const uint ImageScanStep = 0x40000;
+
+    /// <summary>映像区段 AOB 扫描。.text 是 MEM_IMAGE（R-X），Regions() 只枚举 MEM_PRIVATE
+    /// RW 堆扫不到——所以按节边界 ReadBytes 直读。≥2 命中即早停（唯一性由调用方把关）。</summary>
+    static List<ulong> ScanImageAob(ulong addr, uint len, byte[] pattern)
+    {
+        var hits = new List<ulong>();
+        uint pos = 0;
+        while (pos < len)
+        {
+            bool last = len - pos <= ImageScanStep;
+            uint take = last ? len - pos : ImageScanStep + (uint)pattern.Length - 1;
+            var buf = ReadBytes(addr + pos, (int)take);
+            if (buf.Length < pattern.Length) return hits;   // 守卫拦截 → 到此为止（调用方唯一性兜底）
+            int scanEnd = last ? buf.Length - pattern.Length + 1 : (int)ImageScanStep;
+            for (int i = 0; i < scanEnd; i++)
+            {
+                int k = 0;
+                while (k < pattern.Length && buf[i + k] == pattern[k]) k++;
+                if (k == pattern.Length)
+                {
+                    hits.Add(addr + pos + (uint)i);
+                    if (hits.Count > 1) return hits;
+                }
+            }
+            pos += last ? len - pos : ImageScanStep;
+        }
+        return hits;
+    }
+
+    /// <summary>在加载映像里定位游戏调试堆分配函数（fix #27）。DOS→COFF→节表 解析
+    /// .text/.pdata；AOB 唯一命中；.pdata RUNTIME_FUNCTION（Begin 升序）二分取含命中的
+    /// 函数边界。不猜 prologue（x64 PE 必有 .pdata）。0 = 失败（调用方 fail-closed）。</summary>
+    public static ulong LocateGameAlloc(ulong imageBase)
+    {
+        try
+        {
+            uint peOff = ReadU32(imageBase + 0x3C);
+            if (peOff is 0 or > 0x1000) return 0;
+            ulong coff = imageBase + peOff + 4;
+            uint hdr = ReadU32(coff);                          // Machine | NumberOfSections<<16
+            if ((hdr & 0xFFFF) != 0x8664) return 0;            // x64 only
+            int nsec = (int)(hdr >> 16);
+            if (nsec is 0 or > 96) return 0;
+            uint optSize = ReadU32(coff + 16) & 0xFFFF;
+            ulong secTab = imageBase + peOff + 24 + optSize;
+            ulong textVa = 0, pdataVa = 0; uint textSz = 0, pdataSz = 0;
+            for (int i = 0; i < nsec; i++)
+            {
+                ulong h = secTab + (ulong)(i * 40);
+                string name = ReadCString(h, 8);
+                if (name == ".text") { textSz = ReadU32(h + 8); textVa = imageBase + ReadU32(h + 12); }
+                else if (name == ".pdata") { pdataSz = ReadU32(h + 8); pdataVa = imageBase + ReadU32(h + 12); }
+            }
+            if (textVa == 0 || textSz == 0 || pdataVa == 0 || pdataSz < 12) return 0;
+            var hits = ScanImageAob(textVa, textSz, GameAllocAob);
+            if (hits.Count != 1) return 0;
+            uint hitRva = (uint)(hits[0] - imageBase);
+            // .pdata 二分：最后一条 Begin <= hitRva 的条目
+            uint n = pdataSz / 12;
+            uint lo = 0, hi = n;
+            while (lo < hi)
+            {
+                uint mid = lo + (hi - lo) / 2;
+                if (ReadU32(pdataVa + (ulong)mid * 12) <= hitRva) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo == 0) return 0;
+            ulong e = pdataVa + (ulong)(lo - 1) * 12;
+            uint begin = ReadU32(e), end = ReadU32(e + 4);
+            if (!(begin <= hitRva && hitRva < end)) return 0;
+            if (end - begin > 0x2000) return 0;    // 分段函数/异常条目 → 不认（fail-closed）
+            return imageBase + begin;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>分配 RW 内存写入新 buffer（旧 buffer 永不释放——S3 旧帧安全，语义不变）。
+    /// 0 = 失败。fix #27：生产路径改走游戏分配器（懒定位一次缓存）——换入缓冲带统计头，
+    /// 退出遍历的 record 重置全程干净；定位/分配失败 = fail-closed 拒分配（trampoline/
+    /// apply 各自失败路径带明确 reason 上报）。</summary>
     public static ulong AllocRW(byte[] data)
     {
         if (TestMap != null)
@@ -298,9 +404,38 @@ public static unsafe class Mem
             TestAllocs[fake] = data.ToArray();
             return fake;
         }
-        ulong p = VirtualAlloc(0, (nuint)data.Length, 0x3000 /*MEM_COMMIT|MEM_RESERVE*/, 0x04 /*PAGE_READWRITE*/);
-        if (p == 0) { AgentState.Log("VirtualAlloc failed"); return 0; }
+        if (GameAllocOverride != null) return GameAllocOverride(data);
+        if (!gameAllocTried)
+        {
+            lock (gameAllocGate)
+            {
+                if (!gameAllocTried)
+                {
+                    gameAllocTried = true;
+                    try
+                    {
+                        var main = Process.GetCurrentProcess().MainModule;
+                        gameAllocFn = main == null ? 0 : LocateGameAlloc((ulong)main.BaseAddress);
+                    }
+                    catch (Exception ex) { gameAllocFn = 0; AgentState.Log($"game alloc 定位异常: {ex.Message}"); }
+                    AgentState.Log(gameAllocFn == 0
+                        ? "游戏分配器定位失败（AOB/.pdata）——热装分配不可用（fail-closed）"
+                        : $"game alloc located @ 0x{gameAllocFn:X}");
+                }
+            }
+        }
+        if (gameAllocFn == 0) return 0;
+        ulong p = CallGameAlloc(gameAllocFn, (uint)data.Length);
+        if (p == 0) { AgentState.Log($"game alloc failed (size={data.Length})"); return 0; }
         Marshal.Copy(data, 0, (nint)p, data.Length);
         return p;
+    }
+
+    /// <summary>调游戏 DebugAlloc(rcx=size, r9b=flag)。rdx/r8 未用（反汇编钉版）；flag=0 与
+    /// 游戏自己的对齐分配器调用形态一致（xor r9d,r9d）。</summary>
+    static ulong CallGameAlloc(ulong fn, uint size)
+    {
+        var f = (delegate* unmanaged[Stdcall]<uint, nint, nint, byte, nint>)(void*)(nint)fn;
+        return (ulong)f(size, 0, 0, 0);
     }
 }
