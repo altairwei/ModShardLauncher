@@ -95,19 +95,30 @@ public static unsafe class Mem
         return hits;
     }
 
-    /// <summary>探针窗：#11 离线 dump 实证节点区段每 16KB 页 ~16 节点均匀密度 →
-    /// 区段头 16KB 必含 SIG。</summary>
+    /// <summary>头窗：#11 离线 dump 实证节点专属区段 SIG 集中在头 0x100–0x400 →
+    /// 头 16KB 必含 SIG。</summary>
     public const ulong ProbeWindow = 0x4000;
+
+    /// <summary>网格窗间距/宽度（fix-loop #24 v2）：每 64KB 一个 1KB 窗，扫区段内部。
+    /// 头窗抓「节点专属区段」；网格窗抓「尾溢区段」——专属区段装满后尾批节点溢进
+    /// 与其他堆数据共享的区段深处（13:54 boot 真机外扫：+0x53E00/+0xE8A00 两个区段、
+    /// 766 原始节点/378 去重名 = gml_RoomCC_*_Create 全漏）。保证：节点 run
+    /// ≥ GridSpacing+GridWindow 必含一个 64K 整倍数点（鸽笼），其窗落在 run 内且宽于
+    /// 节点间距（实测 ~176–257B）→ 必含一个节点头，与 run 起始对齐无关。窗页对齐 →
+    /// 每窗单页成本（2081MB/64K ≈ 33K 页 ≈ 133MB 触摸）。残留：<64KB 微型尾溢仍可能
+    /// 漏（精确解 = MSL 下发期望去重名数对账，方案 v2b 另议）。</summary>
+    public const ulong GridSpacing = 0x10000;
+    public const ulong GridWindow = 0x400;
 
     /// <summary>最近一次 ScanQwordProbed 的区段统计（Probed 探测/Hitted 命中）——
     /// agent.log 的门控证据源（真机预期 ~19 命中 / 数百探测）。</summary>
     internal static (int Probed, int Hitted) LastProbe;
 
-    /// <summary>fix-loop #24 probe 门控扫描：每区段先扫头 ProbeWindow 探针，含 value
+    /// <summary>fix-loop #24 probe 门控扫描：每区段先探针（头窗 + 网格窗），含 value
     /// 才全扫该区段。22min 索引的真根因不是扫描带宽——全量扫描把游戏 3.3GB 工作集
     /// 逐出，之后 38K 命中 × ~7 次散读全吃 ~4ms 硬页错误（#9 真机实测 26min43s）。
-    /// #11 dump 量化：节点聚 19 区段 ~20MB → 门控扫描量 3.5GB → ~20MB，工作集不动，
-    /// 单轮秒级。探针漏区（SIG 深埋 >16KB）由 NodeIndex 平台期全扫兜底。</summary>
+    /// 门控把扫描量 3.5GB → ~20MB，工作集基本不动。探针漏区（SIG 深埋且无 ≥64KB
+    /// run 的区段）由 NodeIndex 平台期全扫兜底。</summary>
     public static List<ulong> ScanQwordProbed(ulong value)
     {
         var hits = new List<ulong>();
@@ -115,13 +126,25 @@ public static unsafe class Mem
         foreach (var (b, size) in Regions())
         {
             probed++;
-            ulong window = size < ProbeWindow ? size : ProbeWindow;
-            if (ScanRange(b, window, value, null) == 0) continue;
+            if (!ProbeHits(b, size, value)) continue;
             hitted++;
             ScanRange(b, size, value, hits);
         }
         LastProbe = (probed, hitted);
         return hits;
+    }
+
+    /// <summary>区段探针 = 头 ProbeWindow 窗 + 每 GridSpacing 一个 GridWindow 窗。</summary>
+    static bool ProbeHits(ulong b, ulong size, ulong value)
+    {
+        ulong head = size < ProbeWindow ? size : ProbeWindow;
+        if (ScanRange(b, head, value, null) > 0) return true;
+        for (ulong g = GridSpacing; g < size; g += GridSpacing)
+        {
+            ulong w = GridWindow < size - g ? GridWindow : size - g;
+            if (ScanRange(b + g, w, value, null) > 0) return true;
+        }
+        return false;
     }
 
     /// <summary>memchr 式 AOB 扫描（byte? 通配 null；Task 14 AOB 自证用）。</summary>

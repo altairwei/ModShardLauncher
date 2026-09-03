@@ -166,11 +166,53 @@ public class IndexBuildTests : IDisposable
     [Fact]
     public void ScanQwordProbed_SkipsSigBeyondProbeWindow_FullScanFindsIt()
     {
-        Mem.TestMap = new byte[0x8000];              // 32KB：SIG 深埋 0x5000（>16KB 探针窗）
+        Mem.TestMap = new byte[0x8000];              // 32KB：SIG 深埋 0x5000（>16KB 探针窗；
+                                                    // < 64KB 网格间距 → v2 网格也不覆盖，见下）
         W64(Base + 0x5000, SIG);
-        Assert.Empty(Mem.ScanQwordProbed(SIG));      // 探针窗（头 16KB）无 SIG → 整段跳过
+        Assert.Empty(Mem.ScanQwordProbed(SIG));      // 头 16KB 窗无 SIG → 整段跳过
         var hit = Assert.Single(Mem.ScanQword(SIG)); // 全扫（兜底路径的原语）找得到
         Assert.Equal(Base + 0x5000, hit);
+    }
+
+    // ---- fix-loop #24 v2：尾溢区段。13:54 boot 真机形态（外扫钉死）：17 个节点专属
+    // 区段 SIG 在头 0x100–0x400（头窗全中），但专属区段装满后尾批节点（全是
+    // gml_RoomCC_*_Create，766 原始/378 去重名）溢进两个共享堆区段深处——首个 SIG 在
+    // +0x53E00 / +0xE8A00，头 16KB 探针必漏。v2 = 网格窗：每 64KB 一个 1KB 窗，
+    // 保证节点 run（≥64KB+窗宽）必含一个窗（任意 ≥64KB 区间必含 64K 整倍数点；
+    // 1KB 窗宽于节点间距 ~176–257B → 必含一个节点头，与对齐无关）。----
+
+    /// <summary>生产形态复刻（13:54 boot 外扫的逐字段数字）：两个 1028K 区段、
+    /// 392+374 个 256B 间距节点 run 深埋 +0x53E00/+0xE8A00 → v2 网格必须全收。</summary>
+    [Fact]
+    public void ScanQwordProbed_GridCatchesTailSpillRuns_ProductionShape()
+    {
+        Mem.TestMap = new byte[0x202000];
+        Mem.TestRegions = new List<(ulong, ulong)> { (Base, 0x101000), (Base + 0x101000, 0x101000) };
+        void Spill(ulong regionBase, uint firstOff, int count)   // 节点 run：256B 间距 × count
+        {
+            for (int i = 0; i < count; i++) W64(regionBase + firstOff + (ulong)i * 0x100, SIG);
+        }
+        Spill(Base, 0x53E00, 392);
+        Spill(Base + 0x101000, 0xE8A00, 374);
+        var hits = Mem.ScanQwordProbed(SIG);
+        Assert.Equal(392 + 374, hits.Count);         // 两个尾溢 run 全部收入
+        Assert.Contains(Base + 0x53E00, hits);
+        Assert.Contains(Base + 0x101000 + 0xE8A00, hits);
+        Assert.Equal((2, 2), Mem.LastProbe);         // 两段都被探针判「含节点」
+    }
+
+    /// <summary>网格窗语义钉版（成本边界）：窗只开在 64K 整倍数处、宽 1KB——孤立 SIG
+    /// 落在窗外仍跳过。网格保证的是「run ≥ 64KB 必中」，不是任意 SIG 必中。</summary>
+    [Fact]
+    public void ScanQwordProbed_GridWindowsAre1KbAt64KSpacing_SingleSigBetweenWindowsStillSkipped()
+    {
+        Mem.TestMap = new byte[0x30000];             // 192KB：网格点 0x10000/0x20000
+        W64(Base + 0x10800, SIG);                    // 网点 +0x800：窗外（>1KB）
+        Assert.Empty(Mem.ScanQwordProbed(SIG));
+        Mem.TestMap = new byte[0x30000];
+        W64(Base + 0x10008, SIG);                    // 网点 +8：窗内
+        var hit = Assert.Single(Mem.ScanQwordProbed(SIG));
+        Assert.Equal(Base + 0x10008, hit);
     }
 
     [Fact]
