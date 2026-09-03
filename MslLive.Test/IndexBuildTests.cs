@@ -225,21 +225,45 @@ public class IndexBuildTests : IDisposable
         Assert.True(NodeIndex.TryGet("second_region_entry", out _));
     }
 
-    /// <summary>平台期升级兜底：门控连续两轮等计数且未达标 → 恰一次全扫回退（老 22min
-    /// 行为作正确性保底，不循环烧）。真机对应「门控漏区」场景。</summary>
+    /// <summary>平台期升级兜底：门控连续两轮**非零**等计数且未达标 → 恰一次全扫回退（老 22min
+    /// 行为作正确性保底，不循环烧）。真机对应「门控漏区」场景（计数卡在门控可见子集上）。
+    /// fix-loop #26 形态更新：升级前置非零（0,0,0 不再升级，见下一用例）——触发形态改为
+    /// 「门控可见 1 个 + 深埋 1 个、MinNodes=2」：门控稳定报 1（子集）→ 平台期 → 全扫收 2。</summary>
     [Fact]
     public void BeginBuild_GatedPlateau_EscalatesToSingleFullScan()
     {
-        Mem.TestMap = new byte[0x8000];              // SIG 深埋 0x5000：门控永远扫不到
-        PlantNode(Base + 0x5000, Base + 0x6000, "deep_entry");
-        NodeIndex.MinNodes = 1;
+        Mem.TestMap = new byte[0x8000];
+        Mem.TestRegions = new List<(ulong, ulong)> { (Base, 0x2000), (Base + 0x2000, 0x6000) };
+        PlantNode(0x10100, 0x10C00, "gated_entry");   // 区段一（头窗全覆盖）：门控可见
+        PlantNode(0x17000, 0x10D00, "deep_entry");    // 区段二 +0x5000：头窗外、无网格点
+        NodeIndex.MinNodes = 2;
         NodeIndex.RetryMaxAttempts = 8;
         NodeIndex.RetryIntervalMs = 1;
-        NodeIndex.BeginBuild();                      // 轮 1-3 门控 0 节点 → 平台期计数到 2 → 轮 4 全扫
+        NodeIndex.BeginBuild();                      // 轮 1-3 门控稳定 1 节点（<2）→ 平台期计数到 2 → 轮 4 全扫
         Assert.True(NodeIndex.WaitReady(5000));
-        Assert.True(NodeIndex.TryGet("deep_entry", out _));   // 全扫兜底找到了
+        Assert.True(NodeIndex.TryGet("gated_entry", out _));
+        Assert.True(NodeIndex.TryGet("deep_entry", out _));   // 全扫兜底找到了深埋节点
         Assert.Equal(1, NodeIndex.FullScans);                 // 恰一次全扫（22min/轮，绝不重复）
         Assert.Equal("ok", AgentState.Status);
+    }
+
+    /// <summary>#26（15:52 boot 真机钉版）：注册器后绑定未开始的 0,0,0 轮也是「等计数」——
+    /// 但那是「绑定未开始」不是「装载已静默」。零平台期升级全扫会在绑定中途快照：
+    /// 真机 attempt 1-3 全 0（regions 0/88→0/344→0/383）→ attempt 4 全扫收 34720/34724
+    /// 早收工缺 4 名。0 计数只重试、由重试上限兜底，绝不升级全扫。</summary>
+    [Fact]
+    public void BeginBuild_ZeroCountRounds_NeverEscalateToFullScan()
+    {
+        Mem.TestMap = new byte[0x8000];              // 唯一节点深埋 0x5000：门控不可见
+        PlantNode(0x15000, 0x16000, "deep_entry");
+        NodeIndex.MinNodes = 1;
+        NodeIndex.RetryMaxAttempts = 6;
+        NodeIndex.RetryIntervalMs = 1;
+        NodeIndex.BeginBuild();                      // 全程 0 节点轮 → 放弃（不升级全扫）
+        Assert.True(NodeIndex.WaitReady(5000));
+        Assert.Equal(0, NodeIndex.FullScans);                 // 今天 boot 的形态：零轮永不触发全扫
+        Assert.False(NodeIndex.TryGet("deep_entry", out _));  // 门控看不见，诚实放弃
+        Assert.Contains("node index too small (0)", AgentState.Status);
     }
 
     /// <summary>#24 稳定性成功门：门控快扫后「达标」不再隐含绑定装载完成（老代码靠每轮

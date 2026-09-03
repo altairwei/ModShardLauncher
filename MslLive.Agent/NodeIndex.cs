@@ -48,7 +48,10 @@ public static class NodeIndex
     /// 不再逐出工作集，单轮秒级）。快扫后「达标」不再隐含绑定装载完成（老代码每轮
     /// ~20min 扫描天然等到装载完），成功门加稳定性条件：达标且计数与上一轮相等；
     /// 平台期（连续两轮等计数且未达标）疑似门控漏区 → 恰一次全扫兜底（老行为保
-    /// 正确性，22min/轮绝不重复），最优快照守护保证全扫结果不被更差的门控快照覆盖。</summary>
+    /// 正确性，22min/轮绝不重复），最优快照守护保证全扫结果不被更差的门控快照覆盖。
+    /// fix-loop #26：平台期仅计非零等计数——0,0,0 是「绑定未开始」不是「装载已静默」，
+    /// 零轮升级全扫会在绑定中途快照早收工（15:52 boot 实证：attempt 1-3 全 0 →
+    /// attempt 4 全扫 34720/34724，缺 4 个最晚绑定名）。0 计数只重试、重试上限兜底。</summary>
     public static void BeginBuild()
     {
         lock (startLock)
@@ -60,7 +63,8 @@ public static class NodeIndex
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             int prev = -1;          // 上一轮计数（稳定性门的参照）
-            int plateau = 0;        // 未达标连续等计数轮数（平台期 → 疑似门控漏区）
+            int plateau = 0;        // 未达标连续等计数轮数（平台期 → 疑似门控漏区）；
+                                    // #26：仅计非零——0,0,0 是「绑定未开始」非「装载已静默」
             bool fullUsed = false;  // 全扫兜底只跑一次
             int best = -1;          // 最优快照守护：更差的快照不得覆盖更好的
             for (int attempt = 1; ; attempt++)
@@ -86,14 +90,16 @@ public static class NodeIndex
                 }
                 string mode = full ? "full" : $"gated, regions {Mem.LastProbe.Hitted}/{Mem.LastProbe.Probed}";
                 // 成功门：达标且 (本轮为全扫 || 计数与上一轮相等)。全扫可信——它只在
-                // 两轮平台期之后发生，装载已静默；门控轮必须等计数稳定（31K 抢跑收工
-                // 会缺尾批绑定，#11 真机：31K→34724 仍在涨）。
+                // 两轮非零平台期之后发生（#26：0,0,0 是「绑定未开始」，零轮不升级——
+                // 15:52 boot 零平台期升级全扫在绑定中途快照，34720/34724 早收工缺 4 名）；
+                // 门控轮必须等计数稳定（31K 抢跑收工会缺尾批绑定，#11 真机：31K→34724 仍在涨）。
                 if (nodes >= MinNodes && (full || nodes == prev))
                 {
                     AgentState.Log($"node index built: {nodes} nodes in {sw.ElapsedMilliseconds}ms (attempt {attempt}, {mode})");
                     break;
                 }
-                plateau = nodes < MinNodes && nodes == prev ? plateau + 1 : 0;
+                // fix-loop #26：等计数须非零——零平台期升级全扫 = 绑定中途快照（见上）。
+                plateau = nodes < MinNodes && nodes == prev && nodes > 0 ? plateau + 1 : 0;
                 if (full) fullUsed = true;
                 prev = nodes;
                 AgentState.Log($"node index attempt {attempt}: {nodes} nodes in {t.ElapsedMilliseconds}ms ({mode}), retrying in {RetryIntervalMs}ms");
