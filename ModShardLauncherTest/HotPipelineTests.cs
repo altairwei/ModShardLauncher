@@ -1,3 +1,4 @@
+using System.IO.Pipes;
 using ModShardLauncher;
 using ModShardLauncher.HotReload;
 using MslLive.Shared;
@@ -10,9 +11,24 @@ namespace ModShardLauncherTest;
 public class HotPipelineTests : IDisposable
 {
     readonly UndertaleData? savedData;
+    readonly bool savedDev;
+    readonly string? savedPath;
 
-    public HotPipelineTests() => savedData = DataLoader.data;
-    public void Dispose() { if (savedData != null) DataLoader.data = savedData; }
+    public HotPipelineTests()
+    {
+        savedData = DataLoader.data;
+        savedDev = Main.Settings.DevMode;
+        savedPath = DataLoader.savedDataPath;
+    }
+    public void Dispose()
+    {
+        if (savedData != null) DataLoader.data = savedData;
+        Main.Settings.DevMode = savedDev;
+        DataLoader.savedDataPath = savedPath;
+        LiveSession.ForRunningGameOverride = null;
+        LiveSession.Current?.End();
+        BaselineStore.Reset();
+    }
 
     static UndertaleData Load()
     {
@@ -199,4 +215,76 @@ public class HotPipelineTests : IDisposable
 
     [Fact]
     public void NewString_PassesThroughForAgentReject() { /* 取舍清单1：MSL 透传，agent 拒绝——本用例在 Part 2 覆盖 */ }
+
+    // ---- fix #29（15:09 真机形态）----
+
+    static NamedPipeServerStream NewPipeServer(string pipe)
+    {
+        var s = new NamedPipeServerStream(pipe, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        Task.Run(() => s.WaitForConnection());
+        return s;
+    }
+    static void WaitPipeConnected(NamedPipeServerStream s)
+    {
+        for (int i = 0; i < 2000 && !s.IsConnected; i++) Thread.Sleep(5);
+        if (!s.IsConnected) throw new InvalidOperationException("mock agent: client never connected");
+    }
+
+    /// <summary>造一条窗口记录：Register 只对文件做 SHA——小文件互异内容即互异哈希，
+    /// 不必复制 200MB vanilla（Product 侧共用同一份解析产物）。</summary>
+    static CompileRecord SeedRecord(UndertaleData product, string tag)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"msl_b29_{tag}_{Guid.NewGuid():N}.win");
+        File.WriteAllText(tmp, tag + Guid.NewGuid().ToString("N"));
+        return BaselineStore.Register(product, tmp, new List<LiveTextureEntry>());
+    }
+
+    /// <summary>fix #29（15:09 真机形态）：窗口满载且 boot 记录在最旧位时，同一次点击的
+    /// Register 不得先于 lock——否则把本次要锁的 boot 基线挤出 3 条窗口 → LockBaseline
+    /// 落空 →「不在本会话基线窗口」误拒（差一个身位）。重排后 lock 先行（③ 窗口命中即
+    /// pin 出窗，此后逐出不可触），Register 后置；且注册仍发生（「编译过就有记录」——
+    /// 未来 boot 依赖不回归）。mock agent（真管道）上报 boot 哈希模拟游戏 hello。</summary>
+    [Fact]
+    public void BuildAndPush_RegistersAfterLock_FullWindowKeepsBootRecord()
+    {
+        Main.Settings.DevMode = true;
+        var bootProduct = Load();
+        LiveStubInjector.Inject(bootProduct, new LiveQuotas());
+        var recBoot = SeedRecord(bootProduct, "boot");
+        SeedRecord(bootProduct, "x");
+        SeedRecord(bootProduct, "y");                  // 窗口 [boot, x, y]：满载，boot 在最旧位
+        // 本次点击的落盘产物（内容互异 → 哈希互异）
+        DataLoader.savedDataPath = Path.Combine(Path.GetTempPath(), $"msl_b29_click_{Guid.NewGuid():N}.win");
+        File.WriteAllText(DataLoader.savedDataPath, "click-product");
+        string clickHash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(DataLoader.savedDataPath)));
+
+        string pipe = "msl-test-" + Guid.NewGuid().ToString("N");
+        using var server = NewPipeServer(pipe);
+        var agent = Task.Run(() =>
+        {
+            WaitPipeConnected(server);
+            Wire.Send(server, "hello", new HelloMsg
+                { AgentVersion = "v1", Pid = 1, BootHash = recBoot.Hash, StubPresent = true, AgentStatus = "ok" });
+            var ack = Wire.Receive(server);
+            if (!Wire.Decode<HelloAck>(ack.Data).Accept) return;   // 旧序（注册先于锁）在此被拒
+            Wire.Receive(server);   // vars
+            Wire.Receive(server);   // proof
+            Wire.Send(server, "proofAck", new ProofAck { Ok = true, Verified = 64 });
+            var q = Wire.Receive(server);
+            Assert.Equal("queryBlanks", q.Type);
+            Wire.Send(server, "blanks", new BlanksMsg { SpriteFirst = 100, PathFirst = 8 });
+        });
+        LiveSession.ForRunningGameOverride = (quotas, shells) =>
+            new LiveSession(pipe, () => "v1", () => "2022.9.0.0 bc17", () => new List<(string, string)>(),
+                quotas, shells);
+
+        var r = HotPipeline.BuildAndPush(bootProduct, DataLoader.savedDataPath);
+
+        Assert.True(r.Attempted, "同点击注册把 boot 基线挤出窗口（15:09 形态）：" + string.Join("；", r.Failures));
+        Assert.True(r.Succeeded);                          // 同一份 vanilla → 空 batch（无变更）
+        Assert.Same(recBoot, BaselineStore.BootBaseline);   // 锁的是 boot 记录本尊（pin 出窗）
+        Assert.Equal(clickHash, BaselineStore.Latest!.Hash);   // 注册仍发生（未来 boot 依赖）
+        agent.Wait();
+    }
 }

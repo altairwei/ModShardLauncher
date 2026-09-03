@@ -420,15 +420,18 @@ public static class HotPipeline
     static IReadOnlyList<ModFile> EnabledMods() =>
         Controls.ModInfos.Instance.Mods.Where(m => m.isEnabled).ToList();
 
-    /// <summary>写盘后的热通道编排（IO 层）：注册 baseline → 保会话 → BuildBatch → PushBatch。
-    /// 任何一步失败 = 纯写盘降级（写盘已成功，游戏重启即最新，spec §8 三态）。</summary>
+    /// <summary>写盘后的热通道编排（IO 层）：保会话+锁 baseline → 注册 → BuildBatch → PushBatch。
+    /// 任何一步失败 = 纯写盘降级（写盘已成功，游戏重启即最新，spec §8 三态）。
+    /// fix #29（15:09 真机形态）：Register 必须在 lock 之后——同点击的注册先于 LockBaseline
+    /// 会把本次要锁的 boot 基线挤出 3 条窗口（差一个身位 →「不在本会话基线窗口」误拒）。
+    /// 先锁（③ 窗口命中即 pin 出窗，此后逐出不可触）后注册；锁/连接失败的早退路径仍注册
+    /// （「编译过就有记录」——未来 boot 依赖不回归）。</summary>
     public static HotPushResult BuildAndPush(UndertaleData product, string savedFilePath)
     {
         var result = new HotPushResult();
         if (!DevMode.Active) return result;
 
         PngExtractor.WriteBlankPng(ResDirAbs());   // GameStart 的 blank 分配在游戏启动时就要它存在
-        BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
         var session = LiveSession.Current;
         // fix-loop #25（14:54 真机「Pipe is broken」）：死管道只在下次 IO 才暴露——旧游戏
         // 退出后会话 State 仍 Active，复用必得 Pipe is broken 白烧一次编译。目标已死 →
@@ -444,11 +447,27 @@ public static class HotPipeline
             try
             {
                 session = LiveSession.ForRunningGame(DevMode.Quotas, DevMode.ShellBuckets);
-                if (!session.TryConnect()) { result.Failures.Add(session.LastError); return result; }
+                if (!session.TryConnect())
+                {
+                    BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+                    result.Failures.Add(session.LastError);
+                    return result;
+                }
             }
-            catch (Exception ex) { result.Failures.Add($"无热会话：{ex.Message}"); return result; }
+            catch (Exception ex)
+            {
+                BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+                result.Failures.Add($"无热会话：{ex.Message}");
+                return result;
+            }
         }
-        if (BaselineStore.BootBaseline == null) { result.Failures.Add("boot baseline 未锁定"); return result; }
+        if (BaselineStore.BootBaseline == null)
+        {
+            BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+            result.Failures.Add("boot baseline 未锁定");
+            return result;
+        }
+        BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);   // fix #29：锁后注册
 
         result.Attempted = true;
         var sw = Stopwatch.StartNew();

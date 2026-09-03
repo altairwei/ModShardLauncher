@@ -68,9 +68,15 @@ public sealed class LiveSession : IDisposable
         catch { return false; }
     }
 
+    /// <summary>测试缝（fix #29）：非空时替代进程枚举/管道命名——注入绑定假管道的会话，
+    /// 供 BuildAndPush 端到端测试（真管道 + mock agent）。</summary>
+    internal static Func<LiveQuotas, Func<IReadOnlyList<(int, string)>>, LiveSession>?
+        ForRunningGameOverride;
+
     public static LiveSession ForRunningGame(LiveQuotas quotas,
         Func<IReadOnlyList<(int, string)>> shellBuckets)
     {
+        if (ForRunningGameOverride != null) return ForRunningGameOverride(quotas, shellBuckets);
         // 多个 StoneShard 进程时取最新启动的：残留挂起进程（崩溃循环遗留）的 agent
         // 仍在监听自己的 msl-live-<pid> 管道但线程冻结，FirstOrDefault 任挑一个会让
         // 握手静默超时（Task 16 循环 #6 真机实测 13:47 的 receive timeout）
