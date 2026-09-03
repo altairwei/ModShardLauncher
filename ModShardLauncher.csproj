@@ -236,6 +236,15 @@
     <Copy SourceFiles="Reference\UndertaleModLib.dll" DestinationFolder="$(PublishDir)" />
     <Copy SourceFiles="Reference\UndertaleModTool.dll" DestinationFolder="$(PublishDir)" />
     <Copy SourceFiles="$(OutputPath)ModShardLauncher.dll" DestinationFolder="$(PublishDir)" />
+    <!-- fix #28：热加载运行时随发布分发——Build-MslLive.ps1 的 staging 位置（无 RID 段，
+         与 ps1 钉死同一约定；publish 带 -r win-x64 时 $(OutputPath) 会多出 RID 段）整树
+         拷入发布目录。未跑 ps1 → glob 为空 → 静默跳过（应用侧 RuntimeDir 自带
+         「先跑 Build-MslLive.ps1」诚实提示）。 -->
+    <ItemGroup>
+      <MslLiveRuntimeFiles Include="$(BaseOutputPath)$(Configuration)\$(TargetFramework)\msllive-runtime\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MslLiveRuntimeFiles)"
+          DestinationFiles="@(MslLiveRuntimeFiles->'$(PublishDir)msllive-runtime\%(RecursiveDir)%(Filename)%(Extension)')" />
   </Target>
 
 </Project>

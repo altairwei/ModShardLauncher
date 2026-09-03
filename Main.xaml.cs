@@ -166,6 +166,9 @@ namespace ModShardLauncher
         public void Refresh()
         {
             DevIndicator.Visibility = Settings.DevMode ? Visibility.Visible : Visibility.Collapsed;
+            // fix #28：dev 组件自愈补装（Dev 关/dataPath 空/已装/游戏运行中 → 内部自守卫，
+            // 异常只记日志——刷新路径不得被文件 IO 打崩）
+            HotReload.DevMode.EnsureInstalled();
             ModPage = new ModInfos();
             ModSourcePage = new ModSourceInfos();
             Settings settingCache = new();

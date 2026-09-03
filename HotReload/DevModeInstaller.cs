@@ -11,11 +11,13 @@ public static class DevModeInstaller
 {
     public const string Marker = "msllive/installed-by-msl.txt";
 
-    // 测试注入缝（真实默认 = System32 副本 / StoneShard 进程探测；测试换临时文件与谓词）
+    // 测试注入缝（真实默认 = System32 副本 / StoneShard 进程探测 / MSL 安装位；测试换临时文件与谓词）
     internal static string SysVersionDll =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "version.dll");
     internal static Func<bool> GameRunning =
         () => System.Diagnostics.Process.GetProcessesByName("StoneShard").Length > 0;
+    // fix #28 缝：非空时替代安装位推导（测试进程的 BaseDirectory 不是 MSL 安装位）
+    internal static Func<string>? RuntimeDirOverride;
 
     public static bool IsInstalled(string gameDir) =>
         File.Exists(Path.Combine(gameDir, Marker)) && File.Exists(Path.Combine(gameDir, "version.dll"));
@@ -54,5 +56,7 @@ public static class DevModeInstaller
     }
 
     static void TryDelete(string path) { try { File.Delete(path); } catch { } }
-    static string RuntimeDir() => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "msllive-runtime");
+    static string RuntimeDir() => RuntimeDirOverride != null
+        ? RuntimeDirOverride()
+        : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "msllive-runtime");
 }

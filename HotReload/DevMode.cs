@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Serilog;
 
@@ -56,5 +57,34 @@ public static class DevMode
     {
         LiveSession.Current?.End();
         BaselineStore.Reset();
+    }
+
+    /// <summary>fix #28：dev 组件自愈补装（生产调用点 = Main.Refresh——打开 data.win/
+    /// 编译收尾/服务器刷新都过这里，是 gameDir 已知后最早的公共点；ctor 时 dataPath 必空，
+    /// 放 ctor 等于永不执行）。Task 15 只挂了退出卸载（Window_Closing → Uninstall），
+    /// 装上这一半在生产里不存在：MSL 每次退出（游戏恰好关着）组件被移除且永不回来，
+    /// 热会话从此静默死。门控：Dev 开 + dataPath 已知 + 未装 + 游戏未运行；任何异常
+    /// 只记日志不抛（msllive-runtime 缺失时 Install 自带「先跑 Build-MslLive.ps1」指引）。
+    /// gameDir 推导与 Window_Closing 的 Uninstall 同源（dirname(dataPath)）——装/卸
+    /// 认同一个目录。</summary>
+    public static void EnsureInstalled()
+    {
+        try
+        {
+            if (!Active || string.IsNullOrEmpty(DataLoader.dataPath)) return;
+            string gameDir = Path.GetDirectoryName(DataLoader.dataPath)!;
+            if (string.IsNullOrEmpty(gameDir)) return;
+            if (DevModeInstaller.IsInstalled(gameDir)) return;
+            if (DevModeInstaller.GameRunning())
+            {
+                Log.Information("[live] 游戏运行中，跳过 dev 组件补装（关游戏后下次刷新自动补）");
+                return;
+            }
+            DevModeInstaller.Install(gameDir);
+        }
+        catch (Exception ex)
+        {
+            Log.Information("[live] dev 组件补装失败：{msg}（热通道不可用，写盘不受影响）", ex.Message);
+        }
     }
 }
