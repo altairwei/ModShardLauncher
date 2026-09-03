@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using ModShardLauncher.HotReload;
 using MslLive.Shared;
@@ -201,6 +202,35 @@ public class LiveSessionTests : IDisposable
         Assert.NotNull(s.Alloc);
         s.End();
         agent.Wait();
+    }
+
+    // fix-loop #25（14:54 真机「Pipe is broken」）：MSL 长驻跨游戏重启——旧游戏 13:50
+    // 退出后 12:53 会话 State 仍 Active（死管道只在下次 IO 才暴露），14:54 编译复用旧
+    // 会话 = 往死管道推送，白烧一次 4-5min 编译。修复：会话绑定目标进程 PID+启动时刻，
+    // 复用前校验存活（BuildAndPush 布线）。
+    [Fact]
+    public void TargetStillRunning_TrueOnlyWhileTargetProcessAlive()
+    {
+        var s = NewSession("msl-test-" + Guid.NewGuid().ToString("N"));
+        Assert.False(s.TargetStillRunning());          // 未绑定目标（PID 0）→ 不可复用
+
+        using var self = Process.GetCurrentProcess();
+        s.TargetPid = self.Id;
+        s.TargetStart = self.StartTime;
+        Assert.True(s.TargetStillRunning());           // 活进程 + 启动时刻一致 → 可复用
+
+        s.TargetStart = self.StartTime.AddMinutes(-5);
+        Assert.False(s.TargetStillRunning());          // 启动时刻不符（PID 复用形态）→ 不可复用
+        s.TargetStart = self.StartTime;
+
+        using var victim = Process.Start(new ProcessStartInfo("cmd.exe",
+            "/c ping -n 30 127.0.0.1 > NUL") { CreateNoWindow = true, UseShellExecute = false })!;
+        s.TargetPid = victim.Id;
+        s.TargetStart = victim.StartTime;
+        Assert.True(s.TargetStillRunning());           // 目标活着
+        victim.Kill(entireProcessTree: true);
+        Assert.True(victim.WaitForExit(5000));
+        Assert.False(s.TargetStillRunning());          // 目标已退出（14:54 形态）→ 不可复用
     }
 
     public void Dispose() => BaselineStore.Reset();

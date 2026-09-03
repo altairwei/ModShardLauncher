@@ -46,6 +46,28 @@ public sealed class LiveSession : IDisposable
         this.shellBuckets = shellBuckets;
     }
 
+    /// <summary>目标进程绑定（fix-loop #25）：ForRunningGame 记下 PID+启动时刻，
+    /// 会话复用前校验存活。internal 供测试注入。</summary>
+    internal int TargetPid;
+    internal DateTime TargetStart;
+
+    /// <summary>目标进程是否仍在运行。死管道只在下次 IO 才暴露——游戏退出后 State
+    /// 仍 Active，BuildAndPush 复用旧会话 = 往死管道推送白烧一次编译（14:54 真机
+    /// 「Pipe is broken」：12:53 会话 + 13:50 游戏退出 + 14:54 复用）。PID+启动时刻
+    /// 双校验防 PID 复用；任何查询异常按「不可复用」处理——误判代价只是重连（对
+    /// 活目标 TryConnect 也成立），漏判代价是整次编译白烧。启动时刻读不到的进程
+    /// （MinValue 兜底）退化为仅 PID 匹配。</summary>
+    public bool TargetStillRunning()
+    {
+        if (TargetPid == 0) return false;
+        try
+        {
+            using var p = Process.GetProcessById(TargetPid);
+            return !p.HasExited && (TargetStart == DateTime.MinValue || p.StartTime == TargetStart);
+        }
+        catch { return false; }
+    }
+
     public static LiveSession ForRunningGame(LiveQuotas quotas,
         Func<IReadOnlyList<(int, string)>> shellBuckets)
     {
@@ -61,12 +83,15 @@ public sealed class LiveSession : IDisposable
         var (proc, start) = procs[0];
         Log.Information("[live] 目标进程 StoneShard#{Pid}（启动于 {Start:HH:mm:ss}，共 {Count} 个候选）",
             proc.Id, start, procs.Count);
-        return new LiveSession($"msl-live-{proc.Id}",
+        var session = new LiveSession($"msl-live-{proc.Id}",
             () => Main.Instance.mslVersion,
             () => Gen8Guard.VersionOf(ModLoader.Data),
             () => Controls.ModInfos.Instance.Mods.Where(m => m.isEnabled)
                 .Select(m => (m.Name, m.instance.TargetVersion)).ToList(),
             quotas, shellBuckets);
+        session.TargetPid = proc.Id;      // fix-loop #25：绑定目标进程，复用前校验存活
+        session.TargetStart = start;
+        return session;
     }
 
     public bool TryConnect()

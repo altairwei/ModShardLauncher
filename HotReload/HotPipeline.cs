@@ -430,6 +430,15 @@ public static class HotPipeline
         PngExtractor.WriteBlankPng(ResDirAbs());   // GameStart 的 blank 分配在游戏启动时就要它存在
         BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
         var session = LiveSession.Current;
+        // fix-loop #25（14:54 真机「Pipe is broken」）：死管道只在下次 IO 才暴露——旧游戏
+        // 退出后会话 State 仍 Active，复用必得 Pipe is broken 白烧一次编译。目标已死 →
+        // 弃旧会话，本次点击内重连（新游戏 PID 新管道）。
+        if (session != null && session.State == LiveSessionState.Active && !session.TargetStillRunning())
+        {
+            Log.Information("[live] 会话目标进程已退出，弃旧会话重连");
+            session.End();
+            session = null;
+        }
         if (session == null || session.State != LiveSessionState.Active)
         {
             try
