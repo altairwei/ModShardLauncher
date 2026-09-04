@@ -153,11 +153,17 @@ using OnInitGmlFn = void(*)();
 OnInitGmlFn g_onInitGML = nullptr;
 volatile bool g_managedReady = false;
 volatile bool g_registered = false;   // 防御性：唯一 E8 调用者 + F 启动期一次性；若意外重入，首个完成注册
+volatile long g_detourEntries = 0;    // 诊断（E2E 首验）：RA 不匹配的静默路径让 runner 上的钩子时序不可见——留痕判别「钩前已跑完」vs「别处调入」
 
 void DetourLastRegistrar()
 {
     void* ra = _ReturnAddress();          // mov rax,[rsp]（编译器补偿帧偏移）；寄存器随后可随意用
     g_origLastRegistrar();                // 立即放行原注册器——在此之前不做任何可能扰 ABI 的事
+    // 前 3 次逐条留痕（一次性注册器常态 1 次）：ra 与 tick 直接回答钩子时序问题
+    long n = InterlockedIncrement(&g_detourEntries);
+    if (n <= 3)
+        Log("[bootstrap] detour entry #%d ra=0x%llX tick=%llu\n",
+            (int)n, (unsigned long long)(uintptr_t)ra, (unsigned long long)GetTickCount64());
     if (ra != reinterpret_cast<void*>(msladdr::kAfterLastRegistrarCall) || g_registered)
         return;
     g_registered = true;
@@ -250,7 +256,9 @@ DWORD WINAPI BootstrapThread(LPVOID)
                               FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     AddVectoredExceptionHandler(1, CrashVeh);   // 先挂 VEH 再走后续各步：死在哪一步一目了然
-    Log("[bootstrap] attach\n");
+    Log("[bootstrap] attach tick=%llu regcount=%u\n",
+        (unsigned long long)GetTickCount64(),
+        (unsigned)*reinterpret_cast<uint32_t*>(msladdr::kFuncRegistryCount));
 
     if (reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr)) != msladdr::kImageBase)
     { Log("[bootstrap] image base != 0x140000000 (ASLR relocated) — frozen VAs invalid, dormant\n"); return 0; }
@@ -264,7 +272,9 @@ DWORD WINAPI BootstrapThread(LPVOID)
                       &DetourLastRegistrar, reinterpret_cast<void**>(&g_origLastRegistrar)) != MH_OK ||
         MH_EnableHook(reinterpret_cast<void*>(msladdr::kLastRegistrar)) != MH_OK)
     { Log("[bootstrap] MinHook on last registrar failed\n"); return 0; }
-    Log("[bootstrap] hook enabled\n");
+    Log("[bootstrap] hook enabled tick=%llu regcount=%u\n",
+        (unsigned long long)GetTickCount64(),
+        (unsigned)*reinterpret_cast<uint32_t*>(msladdr::kFuncRegistryCount));
 
     std::wstring fxrPath = FindHostFxr();
     if (fxrPath.empty()) { Log("[bootstrap] hostfxr not found (.NET 6 runtime missing?)\n"); return 0; }
@@ -304,7 +314,8 @@ DWORD WINAPI BootstrapThread(LPVOID)
     BootArgs args{ gameDir.c_str(), msladdr::kFunctionAdd, msladdr::kNodeSigFn,
                    msladdr::kExecVtable, msladdr::kFuncRegistryBasePtr, msladdr::kFuncRegistryCount,
                    msladdr::kRegAnchorIdx1, msladdr::kRegAnchorIdx2 };
-    Log("[bootstrap] calling managed Boot\n");
+    Log("[bootstrap] calling managed Boot regcount=%u\n",
+        (unsigned)*reinterpret_cast<uint32_t*>(msladdr::kFuncRegistryCount));
     rc = ((BootFn)bootPtr)(&args);
     if (rc != 0) { Log("[bootstrap] managed Boot returned %d\n", rc); return 0; }
     g_managedReady = true;

@@ -137,13 +137,97 @@ public class ProofVerifyTests : IDisposable
         Assert.Contains("node not found", ack.Error);
     }
 
+    /// <summary>E2E smoke 首证（09-05 00:40 沙箱）：语料里的 wrapper 裸根（scr_e2e_probe 等）
+    /// 在索引里无节点（#17：exec 节点按绑定创建，SCPT 指子不指根）——proof 必须与
+    /// ApplyEngine.Prepare / CalibOps 同源：直名 miss → gml_Script_+裸名回退把住共享 buffer。</summary>
     [Fact]
-    public void AliasChildEntry_Fails()
+    public void RootEntry_Miss_FallsBackToScriptChild()
     {
-        PlantNode("test_proof", LiveOk(), startOff: 5);
+        PlantNode("gml_Script_scr_x", LiveOk());
+        var op = SuccessOp();
+        op.Entry = "scr_x";
+        var ack = RunOne(op);
+        Assert.True(ack.Ok, ack.Error);
+        Assert.Equal(1, ack.Verified);
+    }
+
+    /// <summary>子条目直名命中（StartOff≠0）在 proof 不是死路：载荷 = 子自己的指令流，
+    /// 对照面 = 共享 buffer 的 [StartOff, +ΣByteSize) 子区段（ProofBuilder 不过滤子条目，
+    /// seed 语料必含 gml_Script_*；尾部 wrapper 字节不在对照面内）。载荷长先算后切，
+    /// 避开「先编码才知道长」的循环依赖。</summary>
+    [Fact]
+    public void ChildEntry_VerifiesAgainstSubRange()
+    {
+        var child = BcEncoder.Encode(PopzChain(3).Instructions, new Translator(PopzChain(3)));   // 12B
+        var whole = new byte[24];   // [4B wrapper 头][12B 子体][8B wrapper 尾]
+        for (int i = 0; i < 4; i++) whole[i] = 0x11;
+        for (int i = 16; i < 24; i++) whole[i] = 0x22;
+        child.CopyTo(whole, 4);
+        PlantNode("gml_Script_scr_x", whole, startOff: 4);
+        var op = PopzChain(3);
+        op.Entry = "gml_Script_scr_x";
+        var ack = RunOne(op);
+        Assert.True(ack.Ok, ack.Error);
+        Assert.Equal(1, ack.Verified);
+    }
+
+    /// <summary>子区段对照不是空过：子体区域内的字节篡改必须被抓（wrapper 头/尾不在面内，
+    /// 改了不应影响——由 Verify 测试的 whole 反证）。</summary>
+    [Fact]
+    public void ChildEntry_TamperedSubRange_Fails()
+    {
+        var child = BcEncoder.Encode(PopzChain(3).Instructions, new Translator(PopzChain(3)));
+        var whole = new byte[24];
+        child.CopyTo(whole, 4);
+        whole[6] ^= 0xFF;   // 子区段内（偏移 4+2）
+        PlantNode("gml_Script_scr_x", whole, startOff: 4);
+        var op = PopzChain(3);
+        op.Entry = "gml_Script_scr_x";
+        var ack = RunOne(op);
+        Assert.False(ack.Ok);
+        Assert.Contains("encoded != live", ack.Error);
+    }
+
+    /// <summary>子区段越界（StartOff+载荷长 &gt; buffer 长）= 形态错，fail-closed 明文案。</summary>
+    [Fact]
+    public void ChildEntry_SubRangeOverrun_Fails()
+    {
+        PlantNode("test_proof", LiveOk(), startOff: 5);   // 20B buffer，载荷 20B → 5+20 越界
         var ack = RunOne(SuccessOp());
         Assert.False(ack.Ok);
-        Assert.Contains("alias child entry", ack.Error);
+        Assert.Contains("sub-range", ack.Error);
+    }
+
+    /// <summary>E2E seed 首证（09-05 00:40 沙箱）：脚本调用操作数 = 100000+<b>脚本表序</b>，非
+    /// 100000+node+0x88（CODE 索引）。真机两空间重合（StoneShard CODE chunk 以脚本序打头，
+    /// 脚本 i 的 CODE 索引 == SCPT 序号）掩盖了分离；seed 上 scr_e2e_probe=CODE[2] 但 SCPT[0]，
+    /// 观察者活体 0x186A0 = 100000+0 且 e2e_probe_result.txt=111 证明该操作数真解析到探针
+    /// （排除 raw FUNC 索引假设）。校准值必须胜过 +0x88 兜底（PlantNode 恒写 CodeId=1234 作陷阱）。</summary>
+    [Fact]
+    public void ScriptCall_CalibratedId_BeatsCodeIdFallback()
+    {
+        // 活 buffer：call.i gml_Script_scr_x(argc=0)，操作数 = 100000+0（脚本表序 0）
+        byte[] live =
+        {
+            0x00, 0x00, 0x02, 0xD9,   // 指令字：0xD9<<24 | T1=TInt32<<16 | argc=0
+            0xA0, 0x86, 0x01, 0x00,   // 操作数 0x000186A0 = 100000+0
+            0x00, 0x00, 0x05, 0x9E,   // popz.v 收尾
+        };
+        PlantNode("test_proof", live);
+        var op = new OpMsg
+        {
+            Seq = 0, Kind = "swap", Entry = "test_proof",
+            Instructions =
+            {
+                new SemInstruction { Kind = BcEncoder.OpCall, T1 = BcEncoder.TInt32, Low16 = 0, Fn = "gml_Script_scr_x" },
+                new SemInstruction { Kind = BcEncoder.OpPopz, T1 = BcEncoder.TVariable },
+            },
+        };
+        var ack = RunOne(op);
+        Assert.True(ack.Ok, ack.Error);
+        Assert.Equal(1, ack.Verified);
+        // 收割真实发生：脚本表序 0 进表（+0x88 兜底会编码 100000+1234 ≠ 活体）
+        Assert.Equal(0, CallCalibrator.Map["gml_Script_scr_x"]);
     }
 
     static OpMsg PopzChain(int n)

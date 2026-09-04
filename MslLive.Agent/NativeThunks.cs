@@ -25,9 +25,11 @@ public static unsafe class NativeThunks
 public static class NativeRegistration
 {
     public static int ApplyIndex = -1, ReportIndex = -1;
+    static int registeredOnce;   // 迟燃兜底与 last-registrar detour 理论上可并发抵达——一次语义
 
     public static unsafe void RegisterAll()
     {
+        if (Interlocked.CompareExchange(ref registeredOnce, 1, 0) != 0) return;
         // Function_Add(name, funcptr, argc)——**3 参形态**，Task 11 Step 3 实测无 r9 flag
         // （计划模板写了 4 参，此处按 addresses.h 的 typedef 修正；x64 多传无害但按实测写干净）。
         var add = (delegate* unmanaged[Stdcall]<byte*, void*, int, void>)AgentState.FunctionAdd;

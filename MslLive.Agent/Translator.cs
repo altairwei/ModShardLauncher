@@ -20,7 +20,9 @@ namespace MslLive.Agent;
 /// 靠回落命中 "g:"——S2 黄金 buffer 的 pop.v.v [stacktop]self.scr_unitRenderDrawSprite）；
 /// <b>"l:" 不回落</b>——回落会静默命中 Self 同名符号（借位语义下也无此路径，见
 /// TryBorrowLocal）。
-/// 函数：先注册表（内置，原始索引）后 NodeIndex（脚本，100000+codeId）——名字空间不重叠（S2 ②）。</summary>
+/// 函数：先注册表（内置，原始索引）→ 脚本活体校准（CallCalibrator——E2E seed 首证操作数 =
+/// 100000+脚本表序，真机与 CODE 索引重合是巧合）→ NodeIndex 兜底（脚本，100000+node+0x88）
+/// ——名字空间不重叠（S2 ②）。</summary>
 public sealed class Translator : IOperandResolver
 {
     readonly OpMsg op;
@@ -28,6 +30,7 @@ public sealed class Translator : IOperandResolver
     readonly IReadOnlyDictionary<string, int>? simulated;
     readonly Func<string, int> registryIndexOf;
     readonly Func<string, int?> scriptCodeId;
+    readonly IReadOnlyDictionary<string, int> callCalibrated;
 
     // #30 借位 id：l: miss 的确定性分配状态（首个 miss 时预扫全 op 建排除集）
     readonly Dictionary<string, int> borrowed = new();   // 新局部名 → 借位 id（同 op 同名同 id）
@@ -42,13 +45,15 @@ public sealed class Translator : IOperandResolver
         IReadOnlyDictionary<string, int>? calibrated = null,
         Func<string, int>? registryIndexOf = null,
         Func<string, int?>? scriptCodeId = null,
-        IReadOnlyDictionary<string, int>? simulated = null)
+        IReadOnlyDictionary<string, int>? simulated = null,
+        IReadOnlyDictionary<string, int>? callCalibrated = null)
     {
         this.op = op;
         this.calibrated = calibrated ?? VarCalibrator.Map;
         this.registryIndexOf = registryIndexOf ?? Registry.IndexOf;
         this.scriptCodeId = scriptCodeId ?? (name => NodeIndex.TryGet(name, out var n) ? (int?)n.CodeId : null);
         this.simulated = simulated ?? AgentState.VarMap;
+        this.callCalibrated = callCalibrated ?? CallCalibrator.Map;
     }
 
     /// <summary>VarsMsg 键域选择（与 VarIdSimulator 的 "i:"/"g:"/"l:" 前缀规则同源）。</summary>
@@ -127,9 +132,13 @@ public sealed class Translator : IOperandResolver
     {
         int idx = registryIndexOf(fn);
         if (idx >= 0) return idx;   // 内置/原生函数：注册表原始索引，无偏置（Task 11 新发现 3）
+        // 脚本：活体校准优先——操作数 = 100000+脚本表序，≠ node+0x88 的 CODE 索引
+        // （E2E seed 首证两空间分离；真机 CODE 序巧合重合。见 CallCalibrator）
+        if (callCalibrated.TryGetValue(fn, out int sid))
+            return 100000 + sid;
         int? codeId = scriptCodeId(fn);
-        if (codeId != null) return 100000 + codeId.Value;   // gml_Script_*：100000+codeId（S2 ② 四重验证）
-        throw new TranslationRejectException($"function '{fn}' unknown: not in registry, not in node index");
+        if (codeId != null) return 100000 + codeId.Value;   // 兜底：真机 CODE 序巧合下正确（无语料命中时不回归）
+        throw new TranslationRejectException($"function '{fn}' unknown: not in registry, not calibrated, not in node index");
     }
 
     public int ResolveString(StrRef s)

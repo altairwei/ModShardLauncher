@@ -24,6 +24,9 @@ public static class AgentState
     public static string BootHash = "";
     public static string AgentVersion = "";
     public static bool StubPresent;
+    /// <summary>agent.cfg dump-nodes=1：索引构建收尾把全部节点名落 msllive\nodes.txt
+    /// （E2E 取证面——proof「node not found」时对照索引名 vs 数据条目名；生产不开）。</summary>
+    public static bool DumpNodes;
     public static Dictionary<string, int>? VarMap;   // vars 信封（MSL→agent 单向）
     public static readonly BlanksState Blanks = new();
 
@@ -61,6 +64,49 @@ public static class AgentState
             BootHash = Convert.ToHexString(sha.ComputeHash(fs));   // 大写 hex（ComputeHash(Stream) 全版本可用）
         }
         Log($"agent init: dir={GameDir} ver={AgentVersion} hash={(BootHash.Length > 0 ? BootHash[..8] : "<no data.win>")}");
+
+        // 安装级调参（E2E 引入）：msllive\agent.cfg 的 min-nodes 覆盖索引构建规模门槛。
+        // 门槛是游戏数据规模的属性（StoneShard ~34,720 code entry；E2E seed 仅 ~76）——
+        // 真机安装无 cfg 文件，生产行为不变（NodeIndex 默认 30000）。Boot 期读入 =
+        // 两条点火路径（last-registrar detour→OnInitGML / PipeServer 迟燃）都晚于
+        // Init，时序安全。
+        try
+        {
+            string cfg = Path.Combine(GameDir, "msllive", "agent.cfg");
+            if (File.Exists(cfg))
+                foreach (string raw in File.ReadAllLines(cfg))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    if (line.StartsWith("min-nodes=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (int.TryParse(line["min-nodes=".Length..], out int mn) && mn > 0)
+                        {
+                            NodeIndex.MinNodes = mn;
+                            Log($"agent.cfg: min-nodes={mn}");
+                        }
+                        else Log($"agent.cfg: bad min-nodes ignored: {line}");
+                    }
+                    else if (line.StartsWith("scan=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (line["scan=".Length..].Equals("full", StringComparison.OrdinalIgnoreCase))
+                        {
+                            NodeIndex.AlwaysFullScan = true;
+                            Log("agent.cfg: scan=full");
+                        }
+                        else Log($"agent.cfg: bad scan ignored: {line}");
+                    }
+                    else if (line.StartsWith("dump-nodes=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (line["dump-nodes=".Length..] == "1")
+                        {
+                            DumpNodes = true;
+                            Log("agent.cfg: dump-nodes=1");
+                        }
+                    }
+                }
+        }
+        catch { /* cfg 读失败 = 用默认门槛，不 fail */ }
     }
 
     public static void Fail(string why)
@@ -82,6 +128,7 @@ public static class AgentState
         VarMap = null;
         Blanks.Reset();
         VarCalibrator.ResetForTest();
+        CallCalibrator.ResetForTest();
         Trampoline.ResetForTest();
         ApplyEngine.ResetForTest();
         NodeIndex.ResetForTest();

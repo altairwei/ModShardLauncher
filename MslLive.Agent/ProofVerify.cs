@@ -23,10 +23,10 @@ public static class ProofVerify
         {
             try
             {
-                if (!NodeIndex.TryGet(op.Entry, out var node)) { failed++; errors.Add($"{op.Entry}: node not found"); continue; }
-                if (node.StartOff != 0) { failed++; errors.Add($"{op.Entry}: alias child entry (startOff={node.StartOff}), not swappable"); continue; }
-                byte[] live = Mem.ReadBytes(node.BufPtr, (int)node.BufLen);
-                if (live.Length == 0) { failed++; errors.Add($"{op.Entry}: empty/unreadable live buffer"); continue; }
+                // 节点→活字节解析与 calib 语料同源（TryCorpusLive）：wrapper 裸根回退（#17/#22）、
+                // 子条目直名取子区段（ProofBuilder 不过滤子条目——E2E seed 首证语料必含 gml_Script_*）
+                if (!ApplyEngine.TryCorpusLive(op, out var node, out var live, out string why))
+                { failed++; errors.Add($"{op.Entry}: {why}"); continue; }
 
                 var harvestErrors = new List<string>();
                 if (!VarCalibrator.Harvest(op, live, harvestErrors))
@@ -65,7 +65,16 @@ public static class ProofVerify
     static string FirstDiff(byte[] a, byte[] b)
     {
         for (int i = 0; i < Math.Min(a.Length, b.Length); i++)
-            if (a[i] != b[i]) return $"@0x{i:X}: {a[i]:X2}!={b[i]:X2}";
+            if (a[i] != b[i])
+            {
+                // 取证窗（E2E proof 断点诊断）：首差异前后 16 字节并排——单字节报告分不清
+                // 「100000+0（..A0 86 01 00）vs raw FUNC 160（..A0 00 00 00）」这类操作数空间之争
+                int s = Math.Max(0, i - 8), e = Math.Min(a.Length, i + 8);
+                return $"@0x{i:X} enc[{Hex(a, s, e)}] != live[{Hex(b, s, e)}]";
+            }
         return "@len";
     }
+
+    static string Hex(byte[] x, int s, int e) =>
+        string.Join(' ', Enumerable.Range(s, e - s).Select(j => j < x.Length ? x[j].ToString("X2") : "??"));
 }

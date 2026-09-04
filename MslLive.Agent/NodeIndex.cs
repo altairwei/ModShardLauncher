@@ -27,6 +27,12 @@ public static class NodeIndex
     /// <summary>尝试间隔（boot 期扫描本身 ~秒级，间隔无须太密）。</summary>
     internal static int RetryIntervalMs = 5000;
 
+    /// <summary>agent.cfg scan=full（E2E 小宿主旋钮，AgentState.InitCore 读入）：全程全扫。
+    /// seed 级进程总堆量 MB 级——全扫毫秒完成且无工作集逐出问题；门控探针的鸽笼保证
+    /// 只覆盖 ≥64KB 节点 run，小宿主全部节点 ~15KB 落在探针窗外（E2E smoke 实证
+    /// regions 0/113）。真机安装无 cfg → 恒 false，门控 + 平台期兜底语义不变。</summary>
+    internal static bool AlwaysFullScan;
+
     // fix-loop #15（13:40 proof 31/4 根因）：读名截断 128 字符导致长名条目查不到。
     // GMS 2.3 匿名函数名全库 403 条 >128 字符（F049BBB3 实测，最长 513——agent.log:6637
     // 四条失败名 201/132/137/513）。128 前缀当 key → TryGet(全名) 永远 miss →
@@ -69,7 +75,8 @@ public static class NodeIndex
             int best = -1;          // 最优快照守护：更差的快照不得覆盖更好的
             for (int attempt = 1; ; attempt++)
             {
-                bool full = !fullUsed && plateau >= 2;
+                // AlwaysFullScan（cfg）：每轮全扫，首扫即过成功门（全扫可信，无稳定性轮）
+                bool full = AlwaysFullScan || (!fullUsed && plateau >= 2);
                 var t = System.Diagnostics.Stopwatch.StartNew();
                 Dictionary<string, NodeInfo> fresh;
                 try
@@ -111,6 +118,15 @@ public static class NodeIndex
                 Thread.Sleep(RetryIntervalMs);
             }
             ready.Set();   // 放 Fail/Log 之后：WaitReady 醒来时 Status 已定稿（hello 串不再有竞态）
+            // 取证面（agent.cfg dump-nodes，E2E 用）：索引全量落盘（codeId/startOff/locals/
+            // argc + 名）——proof「node not found」与调用 id 对账（100000+id 操作数 vs node+0x88）
+            // 的第一手证据（#10/#15 当年都要外扫才能拿到）
+            if (AgentState.DumpNodes)
+                try { File.WriteAllLines(Path.Combine(AgentState.GameDir, "msllive", "nodes.txt"),
+                    Volatile.Read(ref byName)
+                        .OrderBy(k => k.Value.CodeId)
+                        .Select(k => $"{k.Value.CodeId}\t{k.Value.StartOff}\t{k.Value.Locals}\t{k.Value.Argc}\t{k.Key}")); }
+                catch { /* 取证文件写失败不致命 */ }
         }) { IsBackground = true, Name = "msl-live-index" }.Start();
     }
 
@@ -187,6 +203,7 @@ public static class NodeIndex
         MinNodes = 30000;
         RetryMaxAttempts = 60;
         RetryIntervalMs = 5000;
+        AlwaysFullScan = false;
         FullScans = 0;
     }
 }

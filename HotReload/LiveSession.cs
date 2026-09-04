@@ -10,6 +10,8 @@ using Serilog;
 
 // 测试钩子构造器是 internal——放行测试程序集（替代方案是把测试构造器做成 public 污染 API）
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ModShardLauncherTest")]
+// E2E 流水线（runner_stoneshard + seed 沙箱）：注入绑定 runner PID 的会话与 DataLoader 内部状态
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("MslLive.E2E")]
 
 namespace ModShardLauncher.HotReload;
 

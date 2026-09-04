@@ -290,6 +290,26 @@ public class IndexBuildTests : IDisposable
         Assert.Equal("ok", AgentState.Status);
     }
 
+    /// <summary>agent.cfg scan=full（E2E 小宿主旋钮）：全程全扫——首扫即成功（全扫可信，
+    /// 无须稳定性确认轮），深埋探针窗外的节点直接可见。E2E smoke 实证（00:06 attempt
+    /// regions 0/113）：seed 级进程全部节点 ~15KB，落在门控头窗外且区段 &lt; 64KB 无网格
+    /// 点——门控的鸽笼保证只覆盖 ≥64KB 节点 run。真机安装无 cfg → 恒 false，
+    /// 门控 + 平台期兜底语义不变（上两用例钉住）。</summary>
+    [Fact]
+    public void BeginBuild_AlwaysFullScan_FirstAttemptSuccess_DeepNodesVisible()
+    {
+        Mem.TestMap = new byte[0x8000];              // 唯一节点深埋 0x5000：门控不可见（同 #26 用例形态）
+        PlantNode(0x15000, 0x16000, "deep_entry");
+        NodeIndex.MinNodes = 1;
+        NodeIndex.RetryIntervalMs = 1;
+        NodeIndex.AlwaysFullScan = true;
+        NodeIndex.BeginBuild();                      // 首扫全扫即收 1 节点 ≥ 门槛 → 无重试轮
+        Assert.True(NodeIndex.WaitReady(5000));
+        Assert.True(NodeIndex.TryGet("deep_entry", out _));
+        Assert.Equal(1, NodeIndex.FullScans);
+        Assert.Equal("ok", AgentState.Status);
+    }
+
     /// <summary>#24 ReadCString 重写（逐字节 VirtualQuery 查界 → 一次查界连续读）的语义
     /// 守卫：跨出可读区段尾即停——与旧实现「首不可读字节停」同界。名字故意不写 NUL，
     /// 钉住「取到界为止、不越界」。</summary>

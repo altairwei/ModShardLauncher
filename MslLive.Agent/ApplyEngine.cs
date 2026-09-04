@@ -118,11 +118,9 @@ public static class ApplyEngine
             // 语料解析：直名 → gml_Script_ 裸名回退（gml_GlobalScript_ 根须剥前缀——子节点名是
             // 裸名形态；只读不换，StartOff≠0 别名子合法：BufPtr=共享基址，根流 walk 从基址对齐）。
             // 注意与 Prepare 的回退不同：那是对 swap 目标的既有行为（#17），此处是语料专用。
-            if (!NodeIndex.TryGet(op.Entry, out var node)
-                && !NodeIndex.TryGet("gml_Script_" + BareName(op.Entry), out node))
-            { AgentState.Log($"calib '{op.Entry}': node not found"); continue; }
-            byte[] live = Mem.ReadBytes(node.BufPtr, (int)node.BufLen);
-            if (live.Length == 0) { AgentState.Log($"calib '{op.Entry}': empty/unreadable live buffer"); continue; }
+            // TryCorpusLive（E2E 后）：子条目直名也进语料（子区段对照），不再整 buffer 错位跳过
+            if (!TryCorpusLive(op, out _, out var live, out string why))
+            { AgentState.Log($"calib '{op.Entry}': {why}"); continue; }
             var errors = new List<string>();
             if (!VarCalibrator.Harvest(op, live, errors))
                 AgentState.Log($"calib '{op.Entry}': harvest partial: {string.Join(" | ", errors.Take(2))}");
@@ -131,8 +129,41 @@ public static class ApplyEngine
         AgentState.Log($"calib: {ok}/{batch.CalibOps.Count} corpus entries harvested clean");
     }
 
-    static string BareName(string entry) =>
+    internal static string BareName(string entry) =>
         entry.StartsWith("gml_GlobalScript_") ? entry.Substring("gml_GlobalScript_".Length) : entry;
+
+    /// <summary>proof / calib 语料共用的「op → (节点, 活字节)」解析（与 Prepare 的 swap 语义
+    /// 不同：只读验证，不做交换面检查）。三种形态：
+    /// ① 直名命中 StartOff=0（普通条目/vanilla 根）→ 整 buffer；
+    /// ② 直名命中 StartOff≠0（gml_Script_* 子条目——ProofBuilder 不过滤子条目，语料必含）
+    ///   → 共享 buffer 的 [StartOff, +ΣByteSize) 子区段（载荷 = 子自己的指令流；尾部 wrapper
+    ///   字节不在对照面内。载荷长先算后切，避开「先编码才知道长」的循环依赖）；
+    /// ③ 直名 miss（wrapper 裸根，#17 无节点）→ gml_Script_+裸名回退（#22 剥前缀）→ 整 buffer
+    ///   （根载荷 = 整流）。失败返 false（why 带文案），调用方决定 proof 计败 / calib 跳过。</summary>
+    internal static bool TryCorpusLive(OpMsg op, out NodeInfo node, out byte[] live, out string why)
+    {
+        node = null!; live = Array.Empty<byte>(); why = "";
+        if (NodeIndex.TryGet(op.Entry, out var direct))
+        {
+            node = direct;
+            byte[] whole = Mem.ReadBytes(node.BufPtr, (int)node.BufLen);
+            if (whole.Length == 0) { why = "empty/unreadable live buffer"; return false; }
+            if (direct.StartOff == 0) { live = whole; return true; }
+            int payloadLen = 0;
+            try { foreach (var sem in op.Instructions) payloadLen += BcEncoder.ByteSize(sem); }
+            catch (Exception ex) { why = ex.Message; return false; }
+            if (direct.StartOff + payloadLen > whole.Length)
+            { why = $"sub-range {direct.StartOff}+{payloadLen} overruns live {whole.Length}B"; return false; }
+            live = new byte[payloadLen];
+            Array.Copy(whole, (int)direct.StartOff, live, 0, payloadLen);
+            return true;
+        }
+        if (!NodeIndex.TryGet("gml_Script_" + BareName(op.Entry), out node))
+        { why = "node not found"; return false; }
+        live = Mem.ReadBytes(node.BufPtr, (int)node.BufLen);
+        if (live.Length == 0) { why = "empty/unreadable live buffer"; return false; }
+        return true;
+    }
 
     /// <summary>单 op Phase 1 链。失败 → 填好 receipt（Stage/Reason）返回 null。</summary>
     static Prepared? Prepare(OpMsg op, OpReceipt receipt, Func<int, ulong> slot)

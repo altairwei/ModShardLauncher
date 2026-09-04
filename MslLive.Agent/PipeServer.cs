@@ -204,7 +204,39 @@ public static class PipeServer
         // 只剩 registry 走表。规模护栏（<30000 → Fail）在构建线程上报（唯一知道总数的时刻）；
         // stub 与索引状态在 Handle 每连接快照。
         if (!Registry.Bootstrap()) AgentState.Fail("registry bootstrap failed");
+
+        // 迟燃兜底（E2E 首验实证 09-04 23:55 smoke）：快 boot 宿主在 MinHook 挂上钩之前
+        // 就跑完了全部注册器（attach→hook enabled 235ms，regcount 0→2535）——last-registrar
+        // detour 永不触发，OnInitGML 丢失 → nodes=0 → 热会话永久拒。判据：注册表完整
+        // （walk 过双锚）而索引未启动 = detour 错过时刻的铁证。就地补跑 RegisterAll +
+        // BeginBuild（管道线程；此刻注册表早已静置，跨线程 Function_Add 安全——表上无并发
+        // 读者，游戏对 apply/report 的引用要到 Trampoline.Install 才建立）。真机慢 boot
+        // 上 detour 先到（OnInitGML 已跑、NodeIndex.Started）→ 本路径自然空转。
+        if (!NodeIndex.Started && RegistryQuiescent())
+        {
+            AgentState.Log("late ignition: registrar moment missed before hook armed (fast boot) — natives + node index now");
+            try
+            {
+                NativeRegistration.RegisterAll();
+                NodeIndex.BeginBuild();
+            }
+            catch (Exception ex) { AgentState.Fail("late ignition failed: " + ex.Message); }
+        }
         AgentState.Log($"self-check: nodes={NodeIndex.Count} registry={Registry.Count} status={AgentState.Status}");
+    }
+
+    /// <summary>注册表静置判据（迟燃前置）：两次采样计数一致且 >1000。walk 已过双锚说明
+    /// 布局可信；计数不再增长说明注册期结束（中途快照会涨）。</summary>
+    static bool RegistryQuiescent()
+    {
+        try
+        {
+            uint c1 = Mem.ReadU32(AgentState.RegCountVa);
+            Thread.Sleep(50);
+            uint c2 = Mem.ReadU32(AgentState.RegCountVa);
+            return c1 == c2 && c1 > 1000;
+        }
+        catch { return false; }
     }
 
     /// <summary>hello 的状态串 = 累积态 + 瞬态后缀。瞬态（索引构建中/未启动）只作本连接后缀、

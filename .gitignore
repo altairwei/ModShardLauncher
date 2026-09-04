@@ -376,3 +376,9 @@ Settings.json
 
 Externals/
 docs/superpowers/
+
+# E2E 测试资产（gm_stub_2022_9.7z 解包产物 + 每测试一次性沙箱）
+E2EFixture/
+# MslLive.E2E 是源码工程：*.e2e（122 行，Windows 大小写不敏感）会把整个目录名
+# MslLive.E2E 当作匹配吞掉——目录必须先于其内容显式豁免（否则 git 不下钻）
+!MslLive.E2E/

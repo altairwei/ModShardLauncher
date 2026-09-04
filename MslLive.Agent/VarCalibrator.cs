@@ -34,6 +34,8 @@ public static class VarCalibrator
             }
             if (sem.Var != null)
                 HarvestOne(op.Entry, sem, BitConverter.ToUInt32(live, off + 4), errors);
+            else if (sem.Fn != null && size >= 8)   // call.i/push.i 函数引用：脚本 id 校准（CallCalibrator）
+                CallCalibrator.HarvestOne(op.Entry, sem, BitConverter.ToUInt32(live, off + 4), errors);
             off += size;
         }
         if (off != live.Length)
