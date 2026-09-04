@@ -5,11 +5,12 @@ namespace MslLive.Agent;
 /// <summary>两阶段应用引擎（spec D4 全成或全弃）。
 /// Phase 1（pipe 线程，Enqueue）：逐 op resolve（NodeIndex 直名优先；#17 实证：wrapper 根
 /// 按绑定创建无节点 → 回退 "gml_Script_"+名经子把住共享 buffer；直名命中子条目才拒——
-/// 子 op 不该存在，CodeDiffer 已滤，防御性守卫）→ validate（#30 局部门：frameOwner =
-/// 共享 BufPtr 的最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行子体——子才是帧主；
-/// 多子 wrapper 取最小偏移的主子），无别名子则节点自身；payload 局部数 &gt; 0 ⇒
-/// frameOwner.Locals &gt; 0（count==0 时激活门把局部访问整条静默跳过 = 唯一真实约束；
-/// 容量上限已按 findings 2026-09-04 §六① 全读者核验删除，另留 &gt;4096 荒谬值护栏）；
+/// 子 op 不该存在，CodeDiffer 已滤，防御性守卫）→ validate（#30 局部门 + #33 count patch：
+/// frameOwner = 共享 BufPtr 的最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行子体——
+/// 子才是帧主；多子 wrapper 取最小偏移的主子），无别名子则节点自身；容量上限已按
+/// findings 2026-09-04 §六① 全读者核验删除（&gt;4096 荒谬值护栏保留）；载荷用局部而
+/// boot 帧局部数 0 时不再拒——#33 改为 commit 窗口把帧计数 0→N patch（invoker 每次调用
+/// 读 node+0xA0 新建容器，count 唯一读者是激活门，详见 Prepare 内注）；
 /// 另核对全部别名的 node+0xA0 == record+0x0C 镜像一致——交换面完整性；#19 自证：已特化
 /// 旧记录按旧 buffer 重算 handler 表/pcmap 与活表比对，不等即拒）→ 编码（Translator/
 /// BcEncoder，Reject 归 validate；#30：l: miss 由 Translator 借位 id，明细进回执）→
@@ -32,9 +33,11 @@ public static class ApplyEngine
         public OpMsg Op = null!;
         public byte[] Bytes = null!;
         public List<ulong> Records = null!;
+        public List<NodeInfo> Aliases = null!;   // #33：count patch 要写别名节点侧（node+0xA0）
         public ulong NewBuf;
         public ulong NewTable;   // #19：handler 表（record+0x20）与 pcmap（+0x28）随 buffer 同换
         public ulong NewMap;
+        public uint LocalsPatch; // #33：0 = 无 patch；否则 commit 窗口写的帧局部数
         public OpReceipt Receipt = null!;
     }
 
@@ -200,11 +203,19 @@ public static class ApplyEngine
         if (op.LocalsCount < 0 || op.LocalsCount > 4096)
         { receipt.Reason = $"locals count out of range: {op.LocalsCount}"; return null; }
         // #30-D：直检载荷 sems——旧编译器对函数形子条目/裸条目恒报 LocalsCount=0（谎，
-        // probe6 实证），只信计数会把「-7 引用 + 谎 0」静默放行（借位池非空时借位成功
-        // → 换入 → 激活门关死 → 局部访问整条静默错值）
+        // probe6 实证），只信计数会把「-7 引用 + 谎 0」的 patch 资格漏判
         bool payloadUsesLocals = op.Instructions.Any(s => s.Inst == -7 && s.Var != null);
+        // #33（真机 scr_console_getseed 整批拒 + E2E array_local 确定复现）：boot 帧局部数 0
+        // + 载荷用局部 → 不再整批拒，commit 窗口把帧计数 0→N patch。RE findings
+        // 2026-09-04 §二/§六① 全读者核验：invoker（0x14028B5C0）每次调用读 node+0xA0
+        // 新建局部容器，count(+0x5C) 唯一读者是激活门（==0 → 局部访问整条静默跳过）——
+        // 不约束 map 容量（find-or-create）、不约束帧栈分配、GC/析构/struct 主线全不看。
+        // N=max(LocalsCount,1)（MSL 救援层对函数形谎 0 已兜底 ≥1；count 除非零外无语义）。
+        // 镜像一致性（下方检查）先核后 patch：全别名 node+0xA0 与 record+0x0C 同批写，
+        // 否则下一次推送会被我们自己的镜像检查拒掉。
+        uint localsPatch = 0;
         if ((payloadUsesLocals || op.LocalsCount > 0) && frameOwner.Locals == 0)
-        { receipt.Reason = $"boot frame locals == 0 but payload uses locals (activation gate would silently skip every local access)"; return null; }
+            localsPatch = (uint)Math.Max(op.LocalsCount, 1);
         // 镜像完整性：全部别名的 node+0xA0 与各自 record+0x0C 必须一致（交换面双侧真源同源）
         foreach (var a in aliases)
         {
@@ -243,8 +254,9 @@ public static class ApplyEngine
         if (records.Count == 0) { receipt.Reason = "no execution records share the buffer"; return null; }
         return new Prepared
         {
-            Op = op, Bytes = bytes, Records = records,
-            NewBuf = newBuf, NewTable = newTable, NewMap = newMap, Receipt = receipt,
+            Op = op, Bytes = bytes, Records = records, Aliases = aliases,
+            NewBuf = newBuf, NewTable = newTable, NewMap = newMap,
+            LocalsPatch = localsPatch, Receipt = receipt,
         };
     }
 
@@ -297,5 +309,20 @@ public static class ApplyEngine
     {
         foreach (var record in p.Records)
             TableBuilder.WriteRecord(record, (uint)p.Bytes.Length, p.NewBuf, p.NewTable, p.NewMap);
+        // #33 激活门 count patch：与指针写同批（游戏线程内无并发读者）；逐别名
+        // node+0xA0 + record+0x0C 双侧写保持镜像不变量（见 Prepare #33 注）。
+        // 只写当前计数为 0 的别名——已开的门不重写（父根/vanilla 根的计数另有语义：
+        // 根在 GlobalInit 只跑一次，帧主是子；多子 wrapper 各子都是自己的帧，全开）
+        if (p.LocalsPatch != 0)
+        {
+            foreach (var a in p.Aliases)
+            {
+                if (Mem.ReadU32(a.Node + 0xA0) != 0) continue;
+                Mem.WriteU32(a.Node + 0xA0, p.LocalsPatch);
+                Mem.WriteU32(a.Record + 0x0C, p.LocalsPatch);
+            }
+            p.Receipt.LocalsPatched = p.LocalsPatch;
+            AgentState.Log($"apply '{p.Op.Entry}': frame locals count 0 -> {p.LocalsPatch} (activation gate patch)");
+        }
     }
 }

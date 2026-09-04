@@ -74,6 +74,10 @@ public sealed class OpReceipt
     /// <summary>#30 借位 id 明细（"l:名→id"）：本 op 经借位分配的局部变量——范围内未用 id，
     /// 纯外观风险（报错文案打印成别人的名字——findings 2026-09-04 §五）。</summary>
     public List<string> BorrowedIds { get; set; } = new();
+    /// <summary>#33 激活门 count patch：boot 帧局部数 0 + 载荷用局部时，commit 窗口把帧计数
+    /// patch 到的值（0 = 本 op 无 patch）。全别名 node+0xA0/record+0x0C 同批写——
+    /// invoker 每次调用读 node+0xA0 新建容器，count 唯一读者是激活门（==0 跳过）。</summary>
+    public uint LocalsPatched { get; set; }
 }
 
 public sealed class BatchReceipt

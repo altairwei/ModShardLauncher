@@ -135,49 +135,68 @@ public class ApplyEngineTests : IDisposable
         Assert.NotEqual(Buf, R64(Record + 0x18));    // 确已换入
     }
 
-    /// <summary>#30 新形态（唯一真实约束）：boot locals == 0 → 容器 count=0 → 激活门把
-    /// 全部局部访问静默跳过（findings §一：count==0 则 push/pop 整条 no-op）——载荷带局部
-    /// = 全部静默错值，拒。对照：载荷 0 局部 + boot 0 → 放行（无局部访问可跳）。</summary>
+    /// <summary>#33（真机 scr_console_getseed 整批拒 00:18 + E2E array_local 确定复现）：
+    /// boot 帧局部数 0 + 载荷用局部 → 不再整批拒，commit 窗口把帧计数 0→N patch。
+    /// RE findings 2026-09-04 §二/§六① 全读者核验：invoker（0x14028B5C0）每次调用读
+    /// node+0xA0 新建局部容器，count(+0x5C) 唯一读者是激活门（==0 → 局部访问整条静默
+    /// 跳过）——不约束 map 容量（find-or-create）、不约束帧栈、GC/析构/struct 不看。
+    /// 全别名 node+0xA0 与 record+0x0C 同批写（镜像不齐 = 下一次推送被自己的镜像检查拒）。
+    /// 对照：0 局部载荷在 0 局部帧上放行且不 patch（无局部访问可开门）。</summary>
     [Fact]
-    public void Enqueue_PayloadLocalsButBootZero_Rejected()
+    public void Enqueue_PayloadLocalsButBootZero_PatchesFrameCountAtCommit()
     {
         PlantNode(Node, Record, Name, Buf, "entry_a", locals: 0);
         NodeIndex.Build();
         var op = PopzOp("entry_a", 1);
         op.LocalsCount = 2;
-        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
-        Assert.Equal("validate", r.Stage);
-        Assert.Contains("boot frame locals", r.Reason);
-        Assert.Equal(Buf, R64(Record + 0x18));       // 未换
+        Assert.Null(ApplyEngine.Enqueue(Batch(op)));        // Phase 1 过（#30 旧形态在此拒）
+        Assert.Equal(Buf, R64(Record + 0x18));              // Phase 1 绝不写指针
+        Assert.Equal(0u, R32(Node + 0xA0));                 // count patch 也在 commit 侧
 
-        var none = PopzOp("entry_a", 1);             // 对照：0 局部载荷在 0 局部帧上放行
-        none.LocalsCount = 0;
-        Assert.Null(ApplyEngine.Enqueue(Batch(none)));
         ApplyEngine.Pump();
+        Assert.NotEqual(Buf, R64(Record + 0x18));           // 确已换入
+        Assert.Equal(2u, R32(Node + 0xA0));                 // 激活门 count：节点侧
+        Assert.Equal(2u, R32(Record + 0x0C));               // 镜像：记录侧
         var receipt = ApplyEngine.TryTakeReceipt();
         Assert.NotNull(receipt);
         Assert.True(receipt!.AllOk);
+        Assert.Equal(2u, Assert.Single(receipt.Ops).LocalsPatched);
+
+        // 对照：0 局部载荷在 0 局部帧上放行且不 patch（无局部访问可开门）——
+        // 全新地址（entry_a 的 record 已被首次 commit 特化 +0x20，复种不清自证面）
+        const ulong NodeB = 0x10300, RecordB = 0x10A00, NameB = 0x10E00, BufB = 0x11400;
+        PlantNode(NodeB, RecordB, NameB, BufB, "entry_b", locals: 0);
+        NodeIndex.Build();
+        var none = PopzOp("entry_b", 1);
+        none.LocalsCount = 0;
+        Assert.Null(ApplyEngine.Enqueue(Batch(none)));
+        ApplyEngine.Pump();
+        Assert.Equal(0u, R32(NodeB + 0xA0));
+        Assert.True(ApplyEngine.TryTakeReceipt()!.AllOk);
     }
 
-    /// <summary>#30-D agent 侧防御：Gate 2 不得只信 op.LocalsCount——旧编译器对函数形子条目/
-    /// 裸条目恒报 0（谎，probe6 实证），MSL 侧救援已兜底 ≥1，但接口边界仍须直检载荷 sems：
-    /// 载荷含 -7 局部引用 + 谎 LocalsCount=0 + boot 帧局部 0 → 拒。借位池非空时谎 0 会把
-    /// 拒批完全绕过（借位成功 → 静默换入 → 激活门关死 → 局部访问整条静默错值）。</summary>
+    /// <summary>#30-D 防御 + #33 结局更新：谎 LocalsCount=0（旧编译器对函数形子条目恒 0，
+    /// probe6 实证）不可信——patch 资格判定必须直检载荷 sems（-7 引用）；借位池非空时
+    /// 借位照常 + patch max(0,1)=1（count 除非零外无语义）。</summary>
     [Fact]
-    public void Enqueue_PayloadLocalRefsLyingZeroCount_BootZero_Rejected()
+    public void Enqueue_PayloadLocalRefsLyingZeroCount_BootZero_PatchesToOne()
     {
         PlantNode(Node, Record, Name, Buf, "entry_a", locals: 0);
         NodeIndex.Build();
-        // 借位池非空（模拟表既有 id）——无 sems 直检时谎 0 载荷会借位成功被静默放行
+        // 借位池非空（模拟表既有 id）——谎 0 载荷借位成功后由 patch 开门（#30 旧形态拒）
         AgentState.VarMap = new Dictionary<string, int> { ["i:some_var"] = 0, ["l:some_local"] = 1 };
         var op = PopzOp("entry_a", 1);
-        op.LocalsCount = 0;                          // 谎值（旧编译器函数形子条目恒 0）
+        op.LocalsCount = 0;                          // 谎值
         op.Instructions.Add(new SemInstruction
             { Kind = BcEncoder.OpPop, T1 = BcEncoder.TVariable, Inst = -7, Var = "_lying_zero_x" });
-        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
-        Assert.Equal("validate", r.Stage);
-        Assert.Contains("boot frame locals", r.Reason);
-        Assert.Equal(Buf, R64(Record + 0x18));       // 未换
+        Assert.Null(ApplyEngine.Enqueue(Batch(op)));
+        ApplyEngine.Pump();
+        Assert.Equal(1u, R32(Node + 0xA0));          // max(谎0, 1) = 1
+        Assert.Equal(1u, R32(Record + 0x0C));
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+        Assert.Equal(1u, Assert.Single(receipt.Ops).LocalsPatched);
     }
 
     /// <summary>#30 荒谬值护栏：负数拒；&gt; 4096 拒（真实函数局部数个位数量级，四位数 =
@@ -332,22 +351,28 @@ public class ApplyEngineTests : IDisposable
         Assert.True(receipt!.AllOk);
     }
 
-    /// <summary>#16b + #30：frameOwner = 最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
-    /// 子体——子才是帧主），不是根。旧「载荷 &gt; 子容量」拒批形态已随 #30 容量上限删除；
-    /// 本测试改钉新语义下的 frameOwner 选择——父 locals=5 但子（帧主）locals=0，载荷带
-    /// 局部 → 拒因取子的 0（若误取父的 5 则放行）。</summary>
+    /// <summary>#16b + #33：frameOwner = 最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
+    /// 子体——子才是帧主），不是根——patch 资格判定读子的计数（父 5 不豁免）。patch 只写
+    /// 计数为 0 的别名：父根（GlobalInit 只跑一次、永不作帧）计数 5 保持不动，
+    /// 子（帧主）0→N。</summary>
     [Fact]
-    public void Enqueue_PayloadLocalsButChildFrameZero_Rejected()
+    public void Enqueue_PayloadLocalsButChildFrameZero_PatchesChildOnly()
     {
         PlantNode(Node, Record, Name, Buf, "entry_a", locals: 5);
         PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", locals: 0, startOff: 4);
         NodeIndex.Build();
         var op = PopzOp("entry_a", 1);
         op.LocalsCount = 1;
-        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
-        Assert.Equal("validate", r.Stage);
-        Assert.Contains("boot frame locals", r.Reason);
-        Assert.Equal(Buf, R64(Record + 0x18));      // 未换
+        Assert.Null(ApplyEngine.Enqueue(Batch(op)));    // #30 旧形态在此拒（误取父的 5 则无 patch）
+        ApplyEngine.Pump();
+        Assert.Equal(5u, R32(Node + 0xA0));             // 父根计数不动（已开的门不重写）
+        Assert.Equal(5u, R32(Record + 0x0C));
+        Assert.Equal(1u, R32(AliasNode + 0xA0));        // 帧主（子）0→1
+        Assert.Equal(1u, R32(AliasRecord + 0x0C));
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+        Assert.Equal(1u, Assert.Single(receipt.Ops).LocalsPatched);
     }
 
     /// <summary>#16b：交换面完整性——全部别名（含子）的 node+0xA0 与各自 record+0x0C
