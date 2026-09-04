@@ -380,4 +380,32 @@ public class HotPipelineTests : IDisposable
         Assert.Equal(clickHash, BaselineStore.Latest!.Hash);   // 注册仍发生（未来 boot 依赖）
         agent.Wait();
     }
+
+    /// <summary>fix #31（09-04 19:31 真机形态）：BuildAndPush 的契约 = 任何一步失败降级纯写盘
+    /// （写盘已成功，见方法注释），但 Register/BuildBatch/PushBatch 一带的未捕获异常会直穿
+    /// CompileDataWinFlow 的 fire-and-forget Task 无声蒸发——零日志零弹窗，还吞掉尾部
+    /// vallina 重载弄脏编译基底（次生：下轮 o_msl_timer already exists）。兜底捕获后必须
+    /// 以 Failures 形态返回，绝不抛出。注入向量：无游戏连接（override 直接抛）→ 早退 catch
+    /// 里的 Register 对不存在的产物路径炸 FileNotFoundException——修复前它从 catch 块里
+    /// 直接逃出方法。</summary>
+    [Fact]
+    public void BuildAndPush_InternalThrow_NeverEscapes_DegradesToFailure()
+    {
+        Main.Settings.DevMode = true;
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        // ResDirAbs 读全局 savedDataPath（非参数）——给个真实存在的临时产物路径让它过
+        DataLoader.savedDataPath = Path.Combine(Path.GetTempPath(), $"msl_b31_ctx_{Guid.NewGuid():N}.win");
+        File.WriteAllText(DataLoader.savedDataPath, "ctx");
+        LiveSession.ForRunningGameOverride = (quotas, shells) =>
+            throw new InvalidOperationException("测试：无游戏连接");
+        try
+        {
+            var r = HotPipeline.BuildAndPush(product,
+                Path.Combine(Path.GetTempPath(), "msl_b31_missing_product.win"));
+            Assert.False(r.Succeeded);
+            Assert.Contains(r.Failures, f => f.Contains("热通道异常"));
+        }
+        finally { LiveSession.ForRunningGameOverride = null; }
+    }
 }

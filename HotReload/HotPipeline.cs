@@ -505,6 +505,23 @@ public static class HotPipeline
     {
         var result = new HotPushResult();
         if (!DevMode.Active) return result;
+        try { return BuildAndPushCore(product, savedFilePath); }
+        catch (Exception ex)
+        {
+            // fix #31（09-04 19:31 真机形态）：上方契约「任何一步失败 = 纯写盘降级」此前只对
+            // 受控失败成立——Register/BuildBatch/PushBatch 一带的未捕获异常会直穿
+            // CompileDataWinFlow 的 fire-and-forget Task 无声蒸发（零日志零弹窗，还吞掉尾部
+            // vallina 重载弄脏编译基底——次生：下轮 o_msl_timer already exists）。兜底捕获：
+            // 带栈落日志、以 Failures 形态返回；具体抛点由栈定位后另行根治。
+            Log.Error(ex, "[live] 热通道未捕获异常——降级纯写盘（写盘已成功）");
+            result.Failures.Add($"热通道异常：{ex.GetType().Name}: {ex.Message}");
+            return result;
+        }
+    }
+
+    static HotPushResult BuildAndPushCore(UndertaleData product, string savedFilePath)
+    {
+        var result = new HotPushResult();
 
         PngExtractor.WriteBlankPng(ResDirAbs());   // GameStart 的 blank 分配在游戏启动时就要它存在
         var session = LiveSession.Current;
@@ -532,7 +549,7 @@ public static class HotPipeline
             catch (Exception ex)
             {
                 BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
-                result.Failures.Add($"无热会话：{ex.Message}");
+                result.Failures.Add(ex.Message);   // ReportResult 统一加「无热会话」语境——此处再拼会双前缀（fix #31）
                 return result;
             }
         }
