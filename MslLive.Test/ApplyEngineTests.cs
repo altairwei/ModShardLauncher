@@ -114,16 +114,86 @@ public class ApplyEngineTests : IDisposable
         Assert.Null(ApplyEngine.TryTakeReceipt());
     }
 
+    /// <summary>#30：容量上限删除——RE 全读者核验（findings 2026-09-04 §六①：count(+0x5C)
+    /// 唯一读者是激活门；容器 map 是 find-or-create，未知 id 当场建槽；GC/析构/struct 主线
+    /// 全不看 count）。载荷局部数 &gt; boot 容量从此放行——用户加局部变量 = 日常最常见编辑，
+    /// 旧「≤ 容量」语义把 scr_console_help 加 4 局部整个拒掉 = #30 立项根因。旧用例
+    /// Enqueue_LocalsMismatch_ValidateFail 钉的拒批形态被 #30 有意取代；剩余真实约束见
+    /// <see cref="Enqueue_PayloadLocalsButBootZero_Rejected"/>。</summary>
     [Fact]
-    public void Enqueue_LocalsMismatch_ValidateFail()
+    public void Enqueue_PayloadExceedsBootLocals_Passes()
     {
-        PlantNode(Node, Record, Name, Buf, "entry_a");
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 2);
         NodeIndex.Build();
-        var bad = PopzOp("entry_a", 1);
-        bad.LocalsCount = 3;                         // 节点/记录都是 2
-        var r = Assert.Single(ApplyEngine.Enqueue(Batch(bad))!);
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 5;                          // 节点/记录都是 2，载荷 5——旧语义在此拒
+        Assert.Null(ApplyEngine.Enqueue(Batch(op)));
+        ApplyEngine.Pump();
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+        Assert.NotEqual(Buf, R64(Record + 0x18));    // 确已换入
+    }
+
+    /// <summary>#30 新形态（唯一真实约束）：boot locals == 0 → 容器 count=0 → 激活门把
+    /// 全部局部访问静默跳过（findings §一：count==0 则 push/pop 整条 no-op）——载荷带局部
+    /// = 全部静默错值，拒。对照：载荷 0 局部 + boot 0 → 放行（无局部访问可跳）。</summary>
+    [Fact]
+    public void Enqueue_PayloadLocalsButBootZero_Rejected()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 0);
+        NodeIndex.Build();
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 2;
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
         Assert.Equal("validate", r.Stage);
-        Assert.Contains("locals mismatch", r.Reason);
+        Assert.Contains("boot frame locals", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));       // 未换
+
+        var none = PopzOp("entry_a", 1);             // 对照：0 局部载荷在 0 局部帧上放行
+        none.LocalsCount = 0;
+        Assert.Null(ApplyEngine.Enqueue(Batch(none)));
+        ApplyEngine.Pump();
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+    }
+
+    /// <summary>#30-D agent 侧防御：Gate 2 不得只信 op.LocalsCount——旧编译器对函数形子条目/
+    /// 裸条目恒报 0（谎，probe6 实证），MSL 侧救援已兜底 ≥1，但接口边界仍须直检载荷 sems：
+    /// 载荷含 -7 局部引用 + 谎 LocalsCount=0 + boot 帧局部 0 → 拒。借位池非空时谎 0 会把
+    /// 拒批完全绕过（借位成功 → 静默换入 → 激活门关死 → 局部访问整条静默错值）。</summary>
+    [Fact]
+    public void Enqueue_PayloadLocalRefsLyingZeroCount_BootZero_Rejected()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 0);
+        NodeIndex.Build();
+        // 借位池非空（模拟表既有 id）——无 sems 直检时谎 0 载荷会借位成功被静默放行
+        AgentState.VarMap = new Dictionary<string, int> { ["i:some_var"] = 0, ["l:some_local"] = 1 };
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 0;                          // 谎值（旧编译器函数形子条目恒 0）
+        op.Instructions.Add(new SemInstruction
+            { Kind = BcEncoder.OpPop, T1 = BcEncoder.TVariable, Inst = -7, Var = "_lying_zero_x" });
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("boot frame locals", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));       // 未换
+    }
+
+    /// <summary>#30 荒谬值护栏：负数拒；&gt; 4096 拒（真实函数局部数个位数量级，四位数 =
+    /// 上游模型错——裁决原文「如 &gt;4096 拒」）。</summary>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(4097)]
+    public void Enqueue_AbsurdOrNegativeLocals_Rejected(int n)
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 2);
+        NodeIndex.Build();
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = n;
+        var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
+        Assert.Equal("validate", r.Stage);
+        Assert.Contains("locals count out of range", r.Reason);
         Assert.Equal(Buf, R64(Record + 0x18));       // 未换
     }
 
@@ -246,8 +316,8 @@ public class ApplyEngineTests : IDisposable
             Mem.TestAllocs[ptr]);
     }
 
-    /// <summary>#16b：≤ 容量语义——载荷局部数 < 帧容量（用户删局部）是安全的
-    /// （帧偏大无害），旧相等语义会误拒。</summary>
+    /// <summary>#16b（#30 后仍真）：载荷局部数 &lt; 帧容量是安全的（帧偏大无害），旧相等
+    /// 语义会误拒。#30 起容量已无上限语义，本用例退为一般放行回归。</summary>
     [Fact]
     public void Enqueue_PayloadFewerLocalsThanFrame_Passes()
     {
@@ -262,19 +332,21 @@ public class ApplyEngineTests : IDisposable
         Assert.True(receipt!.AllOk);
     }
 
-    /// <summary>#16b：frameOwner = 最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
-    /// 子体——子才是帧主），不是根。载荷 5 == 根 5（旧相等语义放行）但 > 子 1 → 必须拒。</summary>
+    /// <summary>#16b + #30：frameOwner = 最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
+    /// 子体——子才是帧主），不是根。旧「载荷 &gt; 子容量」拒批形态已随 #30 容量上限删除；
+    /// 本测试改钉新语义下的 frameOwner 选择——父 locals=5 但子（帧主）locals=0，载荷带
+    /// 局部 → 拒因取子的 0（若误取父的 5 则放行）。</summary>
     [Fact]
-    public void Enqueue_PayloadFitsParentButExceedsChildFrame_Rejected()
+    public void Enqueue_PayloadLocalsButChildFrameZero_Rejected()
     {
         PlantNode(Node, Record, Name, Buf, "entry_a", locals: 5);
-        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", locals: 1, startOff: 4);
+        PlantNode(AliasNode, AliasRecord, AliasName, Buf, "entry_a_child", locals: 0, startOff: 4);
         NodeIndex.Build();
         var op = PopzOp("entry_a", 1);
-        op.LocalsCount = 5;
+        op.LocalsCount = 1;
         var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
         Assert.Equal("validate", r.Stage);
-        Assert.Contains("locals mismatch", r.Reason);
+        Assert.Contains("boot frame locals", r.Reason);
         Assert.Equal(Buf, R64(Record + 0x18));      // 未换
     }
 

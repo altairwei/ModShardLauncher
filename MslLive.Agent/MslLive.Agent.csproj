@@ -7,8 +7,8 @@
     <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <!-- AgentVersion 必须 == MSL 的 mslVersion（"v"+FileVersion），Task 15 的 Build-MslLive.ps1 负责同步盖章 -->
-    <FileVersion>0.13.2.0</FileVersion>
-    <AssemblyVersion>0.13.2.0</AssemblyVersion>
+    <FileVersion>0.13.3.0</FileVersion>
+    <AssemblyVersion>0.13.3.0</AssemblyVersion>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\MslLive.Shared\MslLive.Shared.csproj" />

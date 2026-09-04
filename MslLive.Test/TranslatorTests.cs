@@ -84,15 +84,101 @@ public class TranslatorTests
         Assert.Equal(0xA00186D7u, BitConverter.ToUInt32(b, 4));   // 100000+55 = 100055，不是 i: 的 999
     }
 
-    [Fact]
-    public void Var_LocalScope_Miss_DoesNotFallBackToI_Reject()
+    // ---- #30 借位 id（l: miss → 既有符号表范围内最小未用 id；findings 2026-09-04 §四/§五：
+    // 局部容器每次调用新建，局部 id 只是容器 map 的键，执行面不查全局符号表——新局部名
+    // 可当场借一个范围内 id，无需运行时原语。旧 Var_LocalScope_Miss_DoesNotFallBackToI_Reject
+    // 钉的「l: miss 必拒」被 #30 有意取代）----
+
+    /// <summary>借位用例构造：op 必须携带指令流（借位预扫读 op.Instructions 全量）；
+    /// simulated 显式注入（默认空字典钉死池——不读 ambient AgentState.VarMap，测试不随
+    /// 执行顺序漂移）。</summary>
+    static (Translator t, byte[] Encoded) EncodeBorrow(
+        List<SemInstruction> insts, Dictionary<string, int> calibrated,
+        Dictionary<string, int>? simulated = null)
     {
-        // "l:" 未命中不得回落 "i:"（会静默命中 Self 同名符号 = 错 id）；fail-closed。
-        // i↔g 回落保留（[stacktop]self.X 实证需要，见上）。
-        var calibrated = new Dictionary<string, int> { ["i:key"] = 999 };
-        var t = new Translator(new OpMsg(), calibrated: calibrated,
-            registryIndexOf: _ => -1, scriptCodeId: _ => null);
-        Assert.Throws<TranslationRejectException>(() => EncodeOne(PushVar("key", inst: -7), t));
+        var op = new OpMsg { Instructions = insts };
+        var t = new Translator(op, calibrated: calibrated,
+            registryIndexOf: _ => -1, scriptCodeId: _ => null,
+            simulated: simulated ?? new Dictionary<string, int>());
+        return (t, BcEncoder.Encode(insts, t));
+    }
+
+    /// <summary>#30：l: miss 借「池内最小未用值」——确定性（与字典枚举序无关，取数值最小）。
+    /// 池内 5 未被本 op 引用 → 借 5，不是 9。</summary>
+    [Fact]
+    public void Var_LocalMiss_Borrows_MinUnusedId_Deterministic()
+    {
+        var calibrated = new Dictionary<string, int> { ["l:known"] = 5, ["i:other"] = 9 };
+        var (_, b) = EncodeBorrow(new List<SemInstruction> { PushVar("fresh", inst: -7) }, calibrated);
+        Assert.Equal(0xA00186A5u, BitConverter.ToUInt32(b, 4));   // 100000+5 = 100005
+    }
+
+    /// <summary>#30 预扫排撞：借位必须排除本 op 已引用的全部校准 id——惰性分配会与后续
+    /// 校准命中撞 id（同容器同键 = 静默别名）。池 {5, 9}，l:known 已占 5 → fresh 只能借 9。</summary>
+    [Fact]
+    public void Var_LocalBorrow_ExcludesIdsReferencedInSameOp()
+    {
+        var calibrated = new Dictionary<string, int> { ["l:known"] = 5, ["i:other"] = 9 };
+        var insts = new List<SemInstruction> { PushVar("known", inst: -7), PushVar("fresh", inst: -7) };
+        var (_, b) = EncodeBorrow(insts, calibrated);
+        Assert.Equal(0xA00186A5u, BitConverter.ToUInt32(b, 4));    // known = 校准 5（非借位）
+        Assert.Equal(0xA00186A9u, BitConverter.ToUInt32(b, 12));   // fresh 借 9（100009 = 0x186A9）
+    }
+
+    /// <summary>#30：同 op 同名同 id（记忆化）+ 不同新名不撞（顺序分配最小未用）；
+    /// BorrowedLocals 明细完整（回执据此带分配明细）。</summary>
+    [Fact]
+    public void Var_LocalBorrow_SameNameSameId_DistinctNamesDistinct()
+    {
+        var calibrated = new Dictionary<string, int> { ["i:x"] = 5, ["i:y"] = 9 };
+        var insts = new List<SemInstruction>
+        {
+            PushVar("fresh_a", inst: -7), PushVar("fresh_b", inst: -7), PushVar("fresh_a", inst: -7),
+        };
+        var (t, b) = EncodeBorrow(insts, calibrated);
+        Assert.Equal(0xA00186A5u, BitConverter.ToUInt32(b, 4));    // fresh_a 借 5
+        Assert.Equal(0xA00186A9u, BitConverter.ToUInt32(b, 12));   // fresh_b 借 9（100009，不与 a 撞）
+        Assert.Equal(0xA00186A5u, BitConverter.ToUInt32(b, 20));   // fresh_a 记忆化 = 5
+        Assert.Equal(2, t.BorrowedLocals.Count);
+        Assert.Equal(5, t.BorrowedLocals["fresh_a"]);
+        Assert.Equal(9, t.BorrowedLocals["fresh_b"]);
+    }
+
+    /// <summary>#30（承接 fix #16 的 845 碰撞论证）：借位不回落 i:——l:key miss 且
+    /// i:key=999 在池内时，若走「i: 回落」会得 999；借位语义取池内最小未用（=3），
+    /// 数值上可区分。i↔g 回落保留不变（[stacktop]self.X 实证需要，见上）。</summary>
+    [Fact]
+    public void Var_LocalBorrow_DoesNotFallBackToI()
+    {
+        var calibrated = new Dictionary<string, int> { ["i:key"] = 999, ["l:zzz"] = 5, ["i:aaa"] = 3 };
+        var insts = new List<SemInstruction> { PushVar("zzz", inst: -7), PushVar("key", inst: -7) };
+        var (_, b) = EncodeBorrow(insts, calibrated);
+        Assert.Equal(0xA00186A5u, BitConverter.ToUInt32(b, 4));    // zzz = 校准 5
+        Assert.Equal(0xA00186A3u, BitConverter.ToUInt32(b, 12));   // key 借 3（100003），不是 i: 的 999
+    }
+
+    /// <summary>#30：池并入模拟表（VarsMsg）——校准空、模拟有值时仍可借。借位 id 只需
+    /// 「boot 符号表范围内 + 本 op 内唯一」，不是真名解析，模拟表的 drift 无害。</summary>
+    [Fact]
+    public void Var_LocalBorrow_PoolIncludesSimulatedMap()
+    {
+        var (t, b) = EncodeBorrow(new List<SemInstruction> { PushVar("fresh", inst: -7) },
+            new Dictionary<string, int>(), simulated: new Dictionary<string, int> { ["i:anything"] = 42 });
+        Assert.Equal(0xA00186CAu, BitConverter.ToUInt32(b, 4));    // 100000+42 = 100042
+        Assert.Equal(42, t.BorrowedLocals["fresh"]);
+    }
+
+    /// <summary>#30 fail-closed：池空（校准/模拟皆无值）→ 拒，绝不编造 id——越界 id 会打穿
+    /// 错误格式化器的符号表反查（findings §四）。</summary>
+    [Fact]
+    public void Var_LocalBorrow_EmptyPool_FailClosed()
+    {
+        var insts = new List<SemInstruction> { PushVar("fresh", inst: -7) };
+        var op = new OpMsg { Instructions = insts };
+        var t = new Translator(op, calibrated: new Dictionary<string, int>(),
+            registryIndexOf: _ => -1, scriptCodeId: _ => null, simulated: new Dictionary<string, int>());
+        var ex = Assert.Throws<TranslationRejectException>(() => BcEncoder.Encode(insts, t));
+        Assert.Contains("borrow", ex.Message);
     }
 
     [Fact]

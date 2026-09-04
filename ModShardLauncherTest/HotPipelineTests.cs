@@ -3,6 +3,7 @@ using ModShardLauncher;
 using ModShardLauncher.HotReload;
 using MslLive.Shared;
 using UndertaleModLib;
+using UndertaleModLib.Models;
 using Xunit;
 
 namespace ModShardLauncherTest;
@@ -87,7 +88,9 @@ public class HotPipelineTests : IDisposable
     }
 
     /// <summary>#21 fail-closed：编辑引入 baseline 从未见过的变量名 → 整批不推 + 原因含变量名
-    /// 与重启指引（_ally_hp 事故的正解——宁可拒批也不带模拟值错装）。</summary>
+    /// 与重启指引（_ally_hp 事故的正解——宁可拒批也不带模拟值错装）。
+    /// #30 起本用例钉 i:/g: 半边（global. → "g:"：共享容器，借位 = 与既有变量同槽别名 =
+    /// 静默错值，仍拒）；l: 半边已放行，见 <see cref="ChangedEntry_NewLocalName_NotRejected"/>。</summary>
     [Fact]
     public void ChangedEntry_NewVariableName_RejectedHonestly()
     {
@@ -102,6 +105,96 @@ public class HotPipelineTests : IDisposable
         Assert.Null(r.Batch);
         Assert.Contains(r.Failures, f => f.Contains("msl_never_seen_xyz") && f.Contains("重启"));
     }
+
+    /// <summary>#30：新增局部变量名（boot baseline 无来源）不再拒批——l: miss 由 agent
+    /// 借位分配 id（局部容器每次调用新建，局部 id 只是容器 map 键，执行面不查全局符号表
+    /// ——findings 2026-09-04 §四/§五）。旧「新变量名无法热分配 id」拒批正是 #30 立项根因
+    /// （scr_console_help 加 4 局部被拒）。载荷局部数 2 &gt; boot 帧容量 1 也随 Gate 2 重塑
+    /// 放行（容量上限删除——agent 侧语义，见 MslLive.Test ApplyEngineTests）。</summary>
+    [Fact]
+    public void ChangedEntry_NewLocalName_NotRejected()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        var target = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
+        target.ReplaceGML("msl_live_apply();\nvar _brand_new_local_xyz;\n_brand_new_local_xyz = 1;", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Entry == "gml_Object_o_msl_live_Step_0");
+        // 载荷确实引用了新局部名（l: 键域——agent 侧将借位）
+        Assert.Contains(op.Instructions, i => i.Var == "_brand_new_local_xyz" && i.Inst == -7);
+    }
+
+    /// <summary>#30-D 槽形（新脚本 wrapper，probe6 路径）：新增局部名经救援重写为局部域。
+    /// 旧编译器把 var 局部编译成 Self 域（"i:" 键——probe6 实证），槽 wrapper 无 CodeLocals
+    /// → 判别子 = product Local-VARI − boot Local-VARI 差集（旧编译器对 var 局部恒注册
+    /// Local-VARI，纯语句/函数形皆然）。函数形子条目的编译 LocalsCount=0 是谎——救援须连带
+    /// 兜底 ≥1，否则 -7 引用 + 帧 0 局部 = 激活门关死 = 局部访问静默跳过（probe3/6 实证）。</summary>
+    [Fact]
+    public void NewScriptSlot_NewLocal_RescuedToLocalDomain()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        Msl.AddFunction("function scr_slot_local() { var _slot_fresh_local;\n_slot_fresh_local = 7;\nreturn _slot_fresh_local; }", "scr_slot_local");
+        var caller = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
+        caller.ReplaceGML("msl_live_apply();\nscr_slot_local();", product);
+        var alloc = NewAlloc(boot);
+        var r = HotPipeline.BuildBatch(boot, product, alloc,
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var slotOp = r.Batch!.Ops.First(o => o.Entry == "msl_slot_0");
+        // 载荷确实把新局部名放进了局部域（-7）——agent 侧将借位 id
+        Assert.Contains(slotOp.Instructions, i => i.Var == "_slot_fresh_local" && i.Inst == -7);
+        // 谎 LocalsCount=0 兜底（函数形子条目编译值 0 是谎，probe6；激活门要求 ≥1）
+        Assert.Equal(1, slotOp.LocalsCount);
+    }
+
+    /// <summary>#30-D vanilla 编辑（既有未测洞，probe6 Q11a 路径）：boot 侧 = 真 GMS 编译
+    /// （局部 = l:/-7 域），product 侧 ReplaceGML = 旧编译器（局部 = i:/-1 域）→ 老局部名
+    /// i: 键全 miss → 整批拒。vanilla 条目预存 CodeLocals 且 ReplaceGML 更新它（probe6
+    /// Q11a/Q11b，函数体局部也收）→ 判别子 = CodeLocals。救援后老名变 l: 从 boot 校准
+    /// （不再借位——boot 有真 id）。</summary>
+    [Fact]
+    public void VanillaEdit_VarLocal_RescuedAndCalibratedFromBootLKey()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        // 挑一个带 var 局部的 vanilla 对象事件（根条目、真 GMS 编译 = l: 引用）；
+        // 挑名保持确定性（同数据每次同一 entry）
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_")
+            && c.Instructions.Any(i => (short)i.TypeInst == -7 && VarRefName(i) is string n && n.StartsWith("_")));
+        string? found = null;
+        foreach (var i in bootEntry.Instructions)
+            if ((short)i.TypeInst == -7 && VarRefName(i) is string n && n.StartsWith("_")) { found = n; break; }
+        Assert.NotNull(found);
+        string localName = found!;
+        // product 侧同一事件用旧编译器重编（var 局部 = i: 键）——用户改 vanilla 事件的真实形态
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML($"var {localName};\n{localName} = 1;", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops);
+        Assert.Equal(bootEntry.Name.Content, op.Entry);
+        // 救援：载荷局部引用从实例域（-1）改写为局部域（-7）
+        Assert.Contains(op.Instructions, i => i.Var == localName && i.Inst == -7);
+        Assert.DoesNotContain(op.Instructions, i => i.Var == localName && i.Inst == -1);
+        // 老名不再进借位名单——boot 侧 l: 引用成为校准语料来源（真 id，非借位）
+        Assert.Contains(r.Batch.CalibOps, c => c.Variables.Contains(localName));
+    }
+
+    static string? VarRefName(UndertaleInstruction i) =>
+        (i.Value as UndertaleInstruction.Reference<UndertaleVariable>)?.Target?.Name.Content
+        ?? i.Destination?.Target?.Name.Content;
 
     /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由
     /// 被换 entry 自身的 baseline 版供——语料必须含目标 entry 自己（agent 在换入前收割其

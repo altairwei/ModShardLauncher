@@ -63,6 +63,8 @@ public static class HotPipeline
         for (int i = 0; i < boot.Strings.Count; i++) strg.TryAdd(boot.Strings[i].Content, i);
 
         var ops = new List<OpMsg>();
+        // #30-D 救援判别子：swap op → 本 entry 声明的局部名集（语料算完后核对 missing 键用）
+        var declaredByOp = new Dictionary<OpMsg, HashSet<string>>();
         int seq = 0;
 
         // ---- 资产 loader 片段（精灵 → 壳配置；spec §7.4 顺序）----
@@ -99,6 +101,7 @@ public static class HotPipeline
             {
                 var op = BuildSwapOp(entry, boot, product, ranges, resolver, bootCodeNames, bootFnNames, strg, alloc, ref seq);
                 ops.Add(op);
+                declaredByOp[op] = DeclaredLocals(entry, product, boot);
             }
             catch (Exception ex) when (ex is AssetAmbiguityException or PoolExhaustedException or OverlayException)
             {
@@ -131,18 +134,31 @@ public static class HotPipeline
         }
         else if (stepEntry != null)
         {
-            ops.Insert(0, BuildSwapOp(stepEntry, boot, product, ranges, resolver, bootCodeNames, bootFnNames, strg, alloc, ref seq));
+            var stepOp = BuildSwapOp(stepEntry, boot, product, ranges, resolver, bootCodeNames, bootFnNames, strg, alloc, ref seq);
+            ops.Insert(0, stepOp);
+            declaredByOp[stepOp] = DeclaredLocals(stepEntry, product, boot);
         }
 
-        // ---- #21 校准语料：本批全部 op 的非内置变量引用键必须在 boot baseline 有语料来源；
-        // 无来源 = 编辑引入了游戏从未加载的新变量名（新 id 只有 runner 会分配，我们无安全
-        // 路径）——诚实拒批并说明，绝不带模拟值静默装错代码（_ally_hp 事故）。
+        // ---- #21/#30 校准语料：实例/全局键须在 boot baseline 有语料来源——共享容器必须
+        // 真 intern，借位 = 与既有变量同槽别名 = 静默错值（_ally_hp 事故），诚实拒批；
+        // 局部键（l:）无来源 → 放行，agent 侧借位 id（容器每调用新建，无别名风险）。
         var corpus = CalibCorpus.Build(boot, ops, resolver);
+        // ---- #30-D 救援重写：旧编译器把 var 局部编译成 Self 域（"i:" 键——probe6 2026-09-04
+        // 实证：指令 inst=-1、VARI Target=Self 条目，无逐指令判别子），MSL 生态一直如此编译。
+        // missing 的 i: 键若为本 op 声明的局部名 → 改写 sem 域 -1→-7（probe5 运行时实证：
+        // -7 形态 = 真局部且干净退出）+ LocalsCount 兜底 ≥1（函数形子条目编译值 0 是谎，
+        // 激活门会静默跳过局部访问），再重建语料：老名变 l: 后从 boot l: 来源校准（vanilla
+        // 编辑场景），新名进 UnsourcedLocals 由 agent 借位。其余 i:/g: 照旧拒批（共享容器
+        // 借位 = 别名 = 静默错值）。升级新版 UTMT 编译器后本层自然空转可删（过渡件）。
+        corpus = RescueDeclaredLocals(boot, ops, declaredByOp, resolver, corpus);
+        foreach (var (i, key) in corpus.UnsourcedLocals)
+            Log.Information("[live] {0}: 局部变量 '{1}' 无 boot 来源——agent 借位分配 id（#30）",
+                ops[i].Entry, key[2..]);
         if (corpus.Missing.Count > 0)
         {
             foreach (var (i, key) in corpus.Missing)
-                result.Failures.Add($"{ops[i].Entry}: 变量 '{key[2..]}' 在 boot baseline 无来源" +
-                    "（新变量名无法热分配 id）——本批不推；重启游戏后即可正常载入");
+                result.Failures.Add($"{ops[i].Entry}: 实例/全局变量 '{key[2..]}' 在 boot baseline 无来源" +
+                    "（共享容器无法安全借位分配 id）——本批不推；重启游戏后即可正常载入");
             result.Batch = null;
             return result;
         }
@@ -226,6 +242,65 @@ public static class HotPipeline
         foreach (var a in payload.Assets)
             op.Assets.Add(ResolveAsset(a, boot, product, alloc));
         return op;
+    }
+
+    /// <summary>#30-D 判别子：本 op 载荷声明的局部名集。旧编译器把 var 局部编译成 Self 域，
+    /// 且 MSL 自建条目不建 CodeLocals、谎报 LocalsCount=0（probe6 2026-09-04 实证）。
+    /// 判别子二分：vanilla 条目（预存 LOCZ）——ReplaceGML 会更新 CodeLocals（probe6 Q11a/
+    /// Q11b，连函数体局部也收），直接用；MSL 自建条目/槽 wrapper（无 LOCZ）——product
+    /// Local-VARI − boot Local-VARI 差集（旧编译器对 var 局部恒注册 Local-VARI 条目，
+    /// 纯语句/函数形皆然，probe6 终态 dump 实证）。差集是全局集，可能含其他 entry 新声明的
+    /// 名字（同名时轻微过救）——只用于救本来会被拒批的键，接受该残余。</summary>
+    static HashSet<string> DeclaredLocals(ChangedEntry entry, UndertaleData product, UndertaleData boot)
+    {
+        var names = new HashSet<string>();
+        var cl = product.CodeLocals?.FirstOrDefault(c => c.Name?.Content == entry.Product.Name.Content);
+        if (cl != null)
+        {
+            foreach (var l in cl.Locals)
+            {
+                string? n = l.Name?.Content;
+                if (n != null && n != "arguments") names.Add(n);
+            }
+            return names;
+        }
+        var bootLocal = new HashSet<string>();
+        foreach (var v in boot.Variables)
+            if (v.InstanceType == UndertaleInstruction.InstanceType.Local)
+                bootLocal.Add(v.Name.Content);
+        foreach (var v in product.Variables)
+            if (v.InstanceType == UndertaleInstruction.InstanceType.Local && !bootLocal.Contains(v.Name.Content))
+                names.Add(v.Name.Content);
+        return names;
+    }
+
+    /// <summary>#30-D 救援重写：missing 的 i: 键若在本 op 声明的局部名集内 → 载荷 sem 域
+    /// Self(-1)→Local(-7) + LocalsCount 兜底 ≥1，语料重建（键域变 l: 后：vanilla 老名从
+    /// boot l: 来源校准；新名进 UnsourcedLocals 放行借位）。g: 半边与未声明名不救——
+    /// 共享容器借位 = 与既有变量同槽别名 = 静默错值（_ally_hp 红线）。无救援发生时原样
+    /// 返回（不重扫 boot）。</summary>
+    static CorpusResult RescueDeclaredLocals(UndertaleData boot, List<OpMsg> ops,
+        Dictionary<OpMsg, HashSet<string>> declaredByOp, AssetKindResolver resolver, CorpusResult corpus)
+    {
+        bool any = false;
+        foreach (var (i, key) in corpus.Missing)
+        {
+            if (!key.StartsWith("i:")) continue;
+            string name = key[2..];
+            if (!declaredByOp.TryGetValue(ops[i], out var names) || !names.Contains(name)) continue;
+            var op = ops[i];
+            int flipped = 0;
+            foreach (var sem in op.Instructions)
+                if (sem.Inst == -1 && sem.Var == name) { sem.Inst = -7; flipped++; }
+            if (flipped == 0) continue;
+            int oldCount = op.LocalsCount;
+            op.LocalsCount = Math.Max(op.LocalsCount, 1);
+            Log.Information("[live] {0}: 局部变量 '{1}' 实例域→局部域救援（{2} 条指令 -1→-7，" +
+                "LocalsCount {3}→{4}；旧编译器 var 局部 Self 发射，probe5/6 实证）",
+                op.Entry, name, flipped, oldCount, op.LocalsCount);
+            any = true;
+        }
+        return any ? CalibCorpus.Build(boot, ops, resolver) : corpus;
     }
 
     /// <summary>RunGml 三 op（Task 15 的 agent 语义）：trigger 把 step entry 换成

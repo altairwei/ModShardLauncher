@@ -5,14 +5,15 @@ namespace MslLive.Agent;
 /// <summary>两阶段应用引擎（spec D4 全成或全弃）。
 /// Phase 1（pipe 线程，Enqueue）：逐 op resolve（NodeIndex 直名优先；#17 实证：wrapper 根
 /// 按绑定创建无节点 → 回退 "gml_Script_"+名经子把住共享 buffer；直名命中子条目才拒——
-/// 子 op 不该存在，CodeDiffer 已滤，防御性守卫）→ validate（帧容量
-/// ≤ 语义：frameOwner = 共享 BufPtr 的最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行
-/// 子体——子才是帧主；多子 wrapper 取最小偏移的主子），无别名子则节点自身；op.LocalsCount
-/// ≤ frameOwner.Locals——交换不 patch record+0x0C，帧容量以 boot 值为上限，载荷局部数
-/// 超容量即拒（v1 已知限制：locals 数增长不热更）；另核对全部别名的 node+0xA0 ==
-/// record+0x0C 镜像一致——交换面完整性；#19 自证：已特化旧记录按旧 buffer 重算 handler
-/// 表/pcmap 与活表比对，不等即拒）→ 编码（Translator/BcEncoder，Reject 归
-/// validate）→ TableBuilder 建 handler 表/pcmap（#19：线程化代码 VM 派发走 record+0x20
+/// 子 op 不该存在，CodeDiffer 已滤，防御性守卫）→ validate（#30 局部门：frameOwner =
+/// 共享 BufPtr 的最小 StartOff 别名子（S2④：调子=从偏移 4 进入执行子体——子才是帧主；
+/// 多子 wrapper 取最小偏移的主子），无别名子则节点自身；payload 局部数 &gt; 0 ⇒
+/// frameOwner.Locals &gt; 0（count==0 时激活门把局部访问整条静默跳过 = 唯一真实约束；
+/// 容量上限已按 findings 2026-09-04 §六① 全读者核验删除，另留 &gt;4096 荒谬值护栏）；
+/// 另核对全部别名的 node+0xA0 == record+0x0C 镜像一致——交换面完整性；#19 自证：已特化
+/// 旧记录按旧 buffer 重算 handler 表/pcmap 与活表比对，不等即拒）→ 编码（Translator/
+/// BcEncoder，Reject 归 validate；#30：l: miss 由 Translator 借位 id，明细进回执）→
+/// TableBuilder 建 handler 表/pcmap（#19：线程化代码 VM 派发走 record+0x20
 /// 表，表/pcmap 必须随 buffer 同换）→ VirtualAlloc(RW) 写新 buffer+表+pcmap（失败归
 /// validate 提前量——commit 设计为不可失败）→ 收集共享旧 buffer 的全部执行记录
 /// （S2④ 父子别名同 buffer；#19 全量交换面 = +0x08/+0x18/+0x20/+0x28 四字段）。
@@ -159,10 +160,20 @@ public static class ApplyEngine
         // StartOff 的别名子（执行面），无子则节点自身（普通事件条目）
         var aliases = NodeIndex.All.Where(n => n.BufPtr == node.BufPtr).ToList();
         var frameOwner = aliases.Where(n => n.StartOff != 0).OrderBy(n => n.StartOff).FirstOrDefault() ?? node;
-        // 容量语义：交换不 patch record+0x0C（零运行时 patch），帧以 boot 值定容——
-        // 载荷局部数 ≤ 容量即安全（帧偏大无害），超容量 = 溢出风险，拒
-        if (op.LocalsCount < 0 || (uint)op.LocalsCount > frameOwner.Locals)
-        { receipt.Reason = $"locals mismatch: payload {op.LocalsCount} > frame capacity {frameOwner.Locals}"; return null; }
+        // #30 容量语义重塑（RE findings 2026-09-04 §六① 全读者核验）：count(+0x5C) 唯一
+        // 读者是激活门（==0 → 局部访问整条静默跳过）；容器 map 是 find-or-create（0x1400accd0），
+        // 未知 id 当场建槽不越界；GC/析构/struct 主线全不看 count——「载荷 ≤ boot 容量」
+        // 上限删除（用户加局部 = 日常最常见编辑，旧语义把整类编辑拒掉）。交换仍不 patch
+        // record+0x0C（零运行时 patch），唯一真实约束：boot 帧局部数为 0 时不得引入局部
+        // 访问（激活门关死 → 全部静默错值）。另留荒谬值护栏（裁决原文「如 >4096 拒」）。
+        if (op.LocalsCount < 0 || op.LocalsCount > 4096)
+        { receipt.Reason = $"locals count out of range: {op.LocalsCount}"; return null; }
+        // #30-D：直检载荷 sems——旧编译器对函数形子条目/裸条目恒报 LocalsCount=0（谎，
+        // probe6 实证），只信计数会把「-7 引用 + 谎 0」静默放行（借位池非空时借位成功
+        // → 换入 → 激活门关死 → 局部访问整条静默错值）
+        bool payloadUsesLocals = op.Instructions.Any(s => s.Inst == -7 && s.Var != null);
+        if ((payloadUsesLocals || op.LocalsCount > 0) && frameOwner.Locals == 0)
+        { receipt.Reason = $"boot frame locals == 0 but payload uses locals (activation gate would silently skip every local access)"; return null; }
         // 镜像完整性：全部别名的 node+0xA0 与各自 record+0x0C 必须一致（交换面双侧真源同源）
         foreach (var a in aliases)
         {
@@ -177,8 +188,12 @@ public static class ApplyEngine
             { receipt.Reason = $"specialization self-proof: {why}"; return null; }
 
         byte[] bytes;
-        try { bytes = BcEncoder.Encode(op.Instructions, new Translator(op)); }
+        var translator = new Translator(op);
+        try { bytes = BcEncoder.Encode(op.Instructions, translator); }
         catch (TranslationRejectException ex) { receipt.Reason = ex.Message; return null; }
+        // #30：借位明细进回执（l: 新局部名 → 既有范围内 id；MSL 侧日志可见）
+        foreach (var (name, id) in translator.BorrowedLocals)
+            receipt.BorrowedIds.Add($"l:{name}→{id}");
         if (bytes.Length == 0) { receipt.Reason = "empty payload"; return null; }
 
         // #19 线程化代码 VM：派发走 record+0x20 handler 表（首执行按 buffer 懒构建）——

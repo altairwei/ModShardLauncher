@@ -10,8 +10,13 @@ namespace ModShardLauncher.HotReload;
 public sealed class CorpusResult
 {
     public List<OpMsg> Ops { get; } = new();
-    /// <summary>无 baseline 来源的 (op 下标, 键)——调用方据此诚实拒批（#21 fail-closed）。</summary>
+    /// <summary>无 baseline 来源的 (op 下标, 键)——调用方据此诚实拒批（#21 fail-closed）。
+    /// #30 起只收 i:/g:（共享容器，借位 = 静默别名）。</summary>
     public List<(int OpIndex, string Key)> Missing { get; } = new();
+    /// <summary>#30：无 baseline 来源的 l: 键——放行不拒（agent 侧借位 id：局部容器每调用
+    /// 新建，局部 id 只是容器 map 键，执行面不查全局符号表——findings 2026-09-04 §四/§五）。
+    /// 调用方记日志可见。</summary>
+    public List<(int OpIndex, string Key)> UnsourcedLocals { get; } = new();
 }
 
 /// <summary>#21 校准语料选取（_ally_hp 事故修复的 MSL 半侧）：变量 id 的唯一真源是 runner
@@ -23,8 +28,10 @@ public sealed class CorpusResult
 /// walk 会错位）；同键多源优先 gml_Object_ 事件条目（直名节点命中率高——gml_GlobalScript_
 /// 根在 NodeIndex 无直名节点，agent 侧须回退 gml_Script_ 子名拿共享基址）。
 /// l: 键域严格匹配，i:↔g: 互认（与 Translator 的回落规则同源）。
-/// 全新变量名（baseline 无来源）→ Missing——runner 才会为它分配新 id，我们无安全分配路径，
-/// 诚实拒绝（重启游戏后由正常载入覆盖）。</summary>
+/// 全新实例/全局名（baseline 无来源）→ Missing——共享容器必须真 intern，借位 = 与既有
+/// 变量同槽别名 = 静默错值，诚实拒绝（重启游戏后由正常载入覆盖）。
+/// #30：全新局部名 → UnsourcedLocals 放行——agent 侧借位 id（局部容器每调用新建，
+/// 执行面不查全局符号表，无别名风险——findings 2026-09-04 §四/§五）。</summary>
 public static class CalibCorpus
 {
     /// <summary>键域规则与 Translator.KeyFor 同源：指令 TypeInst -5(Global)→"g:"，-7(Local)→"l:"，其余→"i:"。</summary>
@@ -75,11 +82,16 @@ public static class CalibCorpus
             if (useful) codeByName[entryName] = code;
         }
 
-        // 3. 逐 op 核对覆盖；无来源键 → Missing（构建期诚实拒绝由 HotPipeline 收口）
+        // 3. 逐 op 核对覆盖；无来源键分流（#30）：i:/g: → Missing（共享容器，借位 = 与既有
+        // 变量同槽别名 = _ally_hp 级静默错值，仍诚实拒）；l: → UnsourcedLocals（放行——
+        // agent 侧借位 id，容器每调用新建无别名风险）
         for (int i = 0; i < ops.Count; i++)
             foreach (var k in needed[i])
                 if (!sourceFor.ContainsKey(k))
-                    result.Missing.Add((i, k));
+                {
+                    if (k[0] == 'l') result.UnsourcedLocals.Add((i, k));
+                    else result.Missing.Add((i, k));
+                }
 
         // 4. 语料 entry 去重提取（RefsExtractor 与 ProofBuilder 同参数形态：baseline 无新资产区间）
         foreach (var entryName in sourceFor.Values.Select(v => v.Entry).Distinct())

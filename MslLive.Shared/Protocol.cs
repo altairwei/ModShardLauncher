@@ -71,6 +71,9 @@ public sealed class OpReceipt
     public string Stage { get; set; } = "";      // "resolve" | "validate"（commit 设计为不可失败）
     public string Reason { get; set; } = "";
     public bool RequiresRestart { get; set; }
+    /// <summary>#30 借位 id 明细（"l:名→id"）：本 op 经借位分配的局部变量——范围内未用 id，
+    /// 纯外观风险（报错文案打印成别人的名字——findings 2026-09-04 §五）。</summary>
+    public List<string> BorrowedIds { get; set; } = new();
 }
 
 public sealed class BatchReceipt
