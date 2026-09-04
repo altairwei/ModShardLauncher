@@ -196,6 +196,58 @@ public class HotPipelineTests : IDisposable
         (i.Value as UndertaleInstruction.Reference<UndertaleVariable>)?.Target?.Name.Content
         ?? i.Destination?.Target?.Name.Content;
 
+    /// <summary>#30-D 数组形态（fix #32：09-04 21:58 实弹形态）：旧编译器对函数声明体内的
+    /// 数组元素访问（push.v.d 读 / pop.v.v 存，VARI Target=Self 条目）发射 TypeInst=
+    /// Undefined(0)；同函数的普通 var 引用则是正确的 Local(-7)/PushLoc（21:58 产物 dump
+    /// 实证：_rows/_desc/_villageRep 的数组指令全 0 形态、普通指令全 -7——probe6 的 -1
+    /// 形态只在顶层语句上下文出现）。0 → KeyFor "i:" → 无 boot 来源 → 救援翻转
+    /// sem.Inst==-1 匹配不上 0 → flipped=0 → 整批拒（scr_console_help 热推被拒实弹）。
+    /// 救援须连 0 形态一起翻 -7。</summary>
+    [Fact]
+    public void NewScriptSlot_ArrayLocal_UndefinedDomain_RescuedToLocalDomain()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        Msl.AddFunction("function scr_slot_arr() { var _slot_arr;\n_slot_arr = [1, 2, 3];\nreturn _slot_arr[1]; }", "scr_slot_arr");
+        var caller = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
+        caller.ReplaceGML("msl_live_apply();\nscr_slot_arr();", product);
+        var alloc = NewAlloc(boot);
+        var r = HotPipeline.BuildBatch(boot, product, alloc,
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var slotOp = r.Batch!.Ops.First(o => o.Entry == "msl_slot_0");
+        // 数组元素访问的 0 形态载荷一并翻到局部域（-7）——翻完不得残留 0 域引用
+        Assert.Contains(slotOp.Instructions, i => i.Var == "_slot_arr" && i.Inst == -7);
+        Assert.DoesNotContain(slotOp.Instructions, i => i.Var == "_slot_arr" && i.Inst == 0);
+    }
+
+    /// <summary>#30-D 数组形态·vanilla 面（09-04 21:58 实弹 = scr_console_help/_rows 同款）：
+    /// vanilla 条目重编 + 数组局部 → 判别子走 CodeLocals（ReplaceGML 更新，函数体局部也收）
+    /// → 数组元素 0 形态载荷同样须翻 -7，不得因域形态整批拒。</summary>
+    [Fact]
+    public void VanillaEdit_ArrayLocal_UndefinedDomain_RescuedToLocalDomain()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        // 挑一个确定性 vanilla 根条目（对象事件面，同 VanillaEdit_VarLocal 测试）
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("var _van_arr_local;\n_van_arr_local = [1, 2, 3];\n_van_arr_local[0] = 9;\nreturn _van_arr_local[0];", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.Equal(bootEntry.Name.Content, op.Entry);
+        Assert.Contains(op.Instructions, i => i.Var == "_van_arr_local" && i.Inst == -7);
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "_van_arr_local" && i.Inst == 0);
+    }
+
     /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由
     /// 被换 entry 自身的 baseline 版供——语料必须含目标 entry 自己（agent 在换入前收割其
     /// 换装前活 buffer，时序安全）。</summary>

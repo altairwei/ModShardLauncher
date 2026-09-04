@@ -143,9 +143,11 @@ public static class HotPipeline
         // 真 intern，借位 = 与既有变量同槽别名 = 静默错值（_ally_hp 事故），诚实拒批；
         // 局部键（l:）无来源 → 放行，agent 侧借位 id（容器每调用新建，无别名风险）。
         var corpus = CalibCorpus.Build(boot, ops, resolver);
-        // ---- #30-D 救援重写：旧编译器把 var 局部编译成 Self 域（"i:" 键——probe6 2026-09-04
-        // 实证：指令 inst=-1、VARI Target=Self 条目，无逐指令判别子），MSL 生态一直如此编译。
-        // missing 的 i: 键若为本 op 声明的局部名 → 改写 sem 域 -1→-7（probe5 运行时实证：
+        // ---- #30-D 救援重写：旧编译器对 var 局部有两类错发射域（"i:" 键）——顶层语句上下文
+        // = Self(-1)（probe6 实证）；数组元素访问 = Undefined(0)（push.v.d/pop.v.v，VARI
+        // Target=Self 条目——fix #32 / 09-04 21:58 产物 dump 实证；函数声明体内普通引用
+        // 反而正确发 -7/PushLoc，唯数组元素访问发 0）。无逐指令判别子。
+        // missing 的 i: 键若为本 op 声明的局部名 → 改写 sem 域 →-7（probe5 运行时实证：
         // -7 形态 = 真局部且干净退出）+ LocalsCount 兜底 ≥1（函数形子条目编译值 0 是谎，
         // 激活门会静默跳过局部访问），再重建语料：老名变 l: 后从 boot l: 来源校准（vanilla
         // 编辑场景），新名进 UnsourcedLocals 由 agent 借位。其余 i:/g: 照旧拒批（共享容器
@@ -275,10 +277,15 @@ public static class HotPipeline
     }
 
     /// <summary>#30-D 救援重写：missing 的 i: 键若在本 op 声明的局部名集内 → 载荷 sem 域
-    /// Self(-1)→Local(-7) + LocalsCount 兜底 ≥1，语料重建（键域变 l: 后：vanilla 老名从
+    /// →Local(-7) + LocalsCount 兜底 ≥1，语料重建（键域变 l: 后：vanilla 老名从
     /// boot l: 来源校准；新名进 UnsourcedLocals 放行借位）。g: 半边与未声明名不救——
     /// 共享容器借位 = 与既有变量同槽别名 = 静默错值（_ally_hp 红线）。无救援发生时原样
-    /// 返回（不重扫 boot）。</summary>
+    /// 返回（不重扫 boot）。
+    /// 翻转覆盖两种旧编译器错发射域（fix #32，09-04 21:58 产物 dump 实证）：-1 = Self
+    /// （顶层语句上下文的 var 局部，probe6 形态）；0 = Undefined（数组元素访问
+    /// push.v.d/pop.v.v，VARI Target=Self 条目——函数声明体内的普通 var 引用反而是
+    /// 正确的 -7/PushLoc，唯数组元素访问发 0。21:58 实弹：_rows/_desc/_villageRep
+    /// 全部此形态，旧条件只翻 -1 → flipped=0 → 整批拒）。</summary>
     static CorpusResult RescueDeclaredLocals(UndertaleData boot, List<OpMsg> ops,
         Dictionary<OpMsg, HashSet<string>> declaredByOp, AssetKindResolver resolver, CorpusResult corpus)
     {
@@ -290,14 +297,16 @@ public static class HotPipeline
             if (!declaredByOp.TryGetValue(ops[i], out var names) || !names.Contains(name)) continue;
             var op = ops[i];
             int flipped = 0;
+            var srcDoms = new HashSet<short>();
             foreach (var sem in op.Instructions)
-                if (sem.Inst == -1 && sem.Var == name) { sem.Inst = -7; flipped++; }
+                if ((sem.Inst == -1 || sem.Inst == 0) && sem.Var == name)
+                { srcDoms.Add(sem.Inst); sem.Inst = -7; flipped++; }
             if (flipped == 0) continue;
             int oldCount = op.LocalsCount;
             op.LocalsCount = Math.Max(op.LocalsCount, 1);
-            Log.Information("[live] {0}: 局部变量 '{1}' 实例域→局部域救援（{2} 条指令 -1→-7，" +
-                "LocalsCount {3}→{4}；旧编译器 var 局部 Self 发射，probe5/6 实证）",
-                op.Entry, name, flipped, oldCount, op.LocalsCount);
+            Log.Information("[live] {0}: 局部变量 '{1}' 实例域→局部域救援（{2} 条指令 {3}→-7，" +
+                "LocalsCount {4}→{5}；旧编译器 var 局部错发射域 -1/0，fix #32）",
+                op.Entry, name, flipped, string.Join("/", srcDoms), oldCount, op.LocalsCount);
             any = true;
         }
         return any ? CalibCorpus.Build(boot, ops, resolver) : corpus;
