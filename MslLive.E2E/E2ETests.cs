@@ -102,5 +102,24 @@ public class E2ETests : IDisposable
             "数组局部热语义断裂（观测=" + got + "，期望 42）\n" + h.Diagnostics());
     }
 
+    /// <summary>fix #34 全链路验收（E2E-F）：boot STRG 没有的新字符串字面量（含多字节
+    /// UTF-8 中文）→ StrgIndex=-1 → agent StrgAppendix（游戏堆新块 + 新偏移表 + commit 窗
+    /// RCU 换槽）→ VM push.s 现查表解析新 id → RValue strcpy → return → 观察者落盘。
+    /// 观测 == 原字面量 = 追加/换槽/解析/构造全链对；旧语义这里整批拒（non-boot string）。</summary>
+    [E2EFact]
+    public void StrgAppend_FreshString_HotAppliedAndExecuted()
+    {
+        h.Boot("strg_append");
+
+        const string fresh = "fix34_崭新字符串";
+        var r = h.PushProbeBody("function scr_e2e_probe() { return \"" + fresh + "\"; }");
+
+        Assert.True(r.Attempted, "热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(r.Succeeded, "热推失败：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        string? got = h.WaitResult(fresh);
+        Assert.True(got == fresh,
+            "新字符串热语义断裂（观测=" + got + "，期望 " + fresh + "）\n" + h.Diagnostics());
+    }
+
     public void Dispose() => h.Dispose();
 }

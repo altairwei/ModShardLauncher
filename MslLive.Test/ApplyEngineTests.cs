@@ -217,8 +217,11 @@ public class ApplyEngineTests : IDisposable
     }
 
     [Fact]
-    public void Enqueue_NonBootString_ValidateFail()
+    public void Enqueue_NonBootString_NoTable_FailClosed()
     {
+        // #34：−1 走 StrgAppendix 热分配；本类 TestMap（0x10000 区）不含 STRG 槽
+        // （生产 0x140815020）→ 读 0 → 附录 fail-closed 拒。有表的追加/换槽/回执
+        // 由 StrgAppendixTests 的集成用例覆盖（其 TestMap 覆盖注入的槽地址）。
         PlantNode(Node, Record, Name, Buf, "entry_a");
         NodeIndex.Build();
         var op = new OpMsg
@@ -233,7 +236,8 @@ public class ApplyEngineTests : IDisposable
         };
         var r = Assert.Single(ApplyEngine.Enqueue(Batch(op))!);
         Assert.Equal("validate", r.Stage);
-        Assert.Contains("non-boot string", r.Reason);
+        Assert.Contains("string appendix", r.Reason);
+        Assert.Equal(Buf, R64(Record + 0x18));       // 未换
     }
 
     [Fact]

@@ -37,6 +37,7 @@ public static class ApplyEngine
         public ulong NewBuf;
         public ulong NewTable;   // #19：handler 表（record+0x20）与 pcmap（+0x28）随 buffer 同换
         public ulong NewMap;
+        public ulong StrgTable;  // #34：StrgAppendix 新偏移表（batch 共享；Pump 首个非零时换槽一次）
         public uint LocalsPatch; // #33：0 = 无 patch；否则 commit 窗口写的帧局部数
         public OpReceipt Receipt = null!;
     }
@@ -78,6 +79,7 @@ public static class ApplyEngine
         if (failReceipt != null)
         {
             // spec D4：整批弃——prepared 里的 buffer 已分配但永不换入（留置，与旧 buffer 同策）
+            StrgAppendix.DiscardPending();   // #34：弃批——半物化 id 不得残留去重表
             var all = batch.Ops.Select((o, i) => i == failAt ? failReceipt : new OpReceipt
             {
                 Seq = o.Seq, Entry = o.Entry, Stage = "validate",
@@ -86,18 +88,39 @@ public static class ApplyEngine
             AgentState.Log($"apply batch {batch.BatchSeq} aborted at {failReceipt.Entry}: {failReceipt.Reason}");
             return all;
         }
+        // #34 防御性拒收前置：先确认能入队再物化（若先物化后拒收，committed 已转正而表
+        // 永不换入——下批同字符串复用幽灵 id → push 越界读）。pending.Count 只在 Enqueue
+        // （pipe 线程单线程）增加、Pump 只减——本检查过后到入队前不可能变非零。
         lock (gate)
         {
             if (pending.Count > 0)
             {
                 // MSL 顺序收发（等回执才发下一批），正常到不了这里——防御性拒收，防回执串批
+                StrgAppendix.DiscardPending();   // #34：弃本批预分配（未物化，仅记账）
                 return batch.Ops.Select(o => new OpReceipt
                 {
                     Seq = o.Seq, Entry = o.Entry, Stage = "validate",
                     Reason = "previous batch still pending (waiting for next frame)",
                 }).ToList();
             }
-            foreach (var p in prepared) pending.Enqueue(p);
+        }
+        // #34：整批通过——新字符串物化（块+新表，pipe 线程；换槽在 Pump 的 commit 窗）。
+        // 失败（偏移域外/分配失败）按整批弃处理（Materialize 内部已弃 pending）。
+        ulong strgTable = 0;
+        try { (strgTable, _) = StrgAppendix.Materialize(); }
+        catch (TranslationRejectException ex)
+        {
+            var all = batch.Ops.Select(o => new OpReceipt
+            {
+                Seq = o.Seq, Entry = o.Entry, Stage = "validate",
+                Reason = $"batch aborted: string appendix ({ex.Message})",
+            }).ToList();
+            AgentState.Log($"apply batch {batch.BatchSeq} aborted: string appendix: {ex.Message}");
+            return all;
+        }
+        lock (gate)
+        {
+            foreach (var p in prepared) { p.StrgTable = strgTable; pending.Enqueue(p); }
             pendingBatchSeq = batch.BatchSeq;
         }
         AgentState.Log($"apply batch {batch.BatchSeq}: {prepared.Count} ops queued for next frame");
@@ -236,6 +259,9 @@ public static class ApplyEngine
         // #30：借位明细进回执（l: 新局部名 → 既有范围内 id；MSL 侧日志可见）
         foreach (var (name, id) in translator.BorrowedLocals)
             receipt.BorrowedIds.Add($"l:{name}→{id}");
+        // #34：热分配字符串明细进回执（内容 → 新 id）
+        foreach (var (content, id) in translator.StrgAppended)
+            receipt.StrgAppended.Add($"{content}→{id}");
         if (bytes.Length == 0) { receipt.Reason = "empty payload"; return null; }
 
         // #19 线程化代码 VM：派发走 record+0x20 handler 表（首执行按 buffer 懒构建）——
@@ -278,6 +304,10 @@ public static class ApplyEngine
         lock (gate)
         {
             if (pending.Count == 0) return;
+            // #34：字符串偏移表换槽（commit 窗，游戏线程无并发读者）——新表在 Enqueue 已
+            // 完整就位，本写是唯一动作（不可失败）；批内只换一次（prepared 共享同表）
+            ulong strgTable = pending.Peek().StrgTable;
+            if (strgTable != 0) StrgAppendix.SwapTable(strgTable);
             while (pending.Count > 0)
             {
                 var p = pending.Dequeue();

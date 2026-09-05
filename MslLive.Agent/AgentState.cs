@@ -129,6 +129,7 @@ public static class AgentState
         Blanks.Reset();
         VarCalibrator.ResetForTest();
         CallCalibrator.ResetForTest();
+        StrgAppendix.ResetForTest();
         Trampoline.ResetForTest();
         ApplyEngine.ResetForTest();
         NodeIndex.ResetForTest();

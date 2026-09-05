@@ -233,12 +233,14 @@ public class TranslatorTests
     }
 
     [Fact]
-    public void String_NonBoot_Reject()
+    public void String_NonBoot_NoTable_FailClosed()
     {
+        // #34：−1 走 StrgAppendix 热分配（不再直接拒）；本测试环境无 STRG 表（槽读 0）
+        // → 附录 fail-closed 拒。有表路径的分配/物化/换槽由 StrgAppendixTests 覆盖。
         var op = new OpMsg { Strings = { new StrRef { Content = "fresh", StrgIndex = -1 } } };
         var sem = new SemInstruction { Kind = BcEncoder.OpPush, T1 = BcEncoder.TString, Str = "fresh" };
         var ex = Assert.Throws<TranslationRejectException>(() => EncodeOne(sem, Make(op)));
-        Assert.Contains("non-boot string", ex.Message);
+        Assert.Contains("string appendix", ex.Message);
     }
 
     [Fact]

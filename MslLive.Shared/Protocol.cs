@@ -74,6 +74,10 @@ public sealed class OpReceipt
     /// <summary>#30 借位 id 明细（"l:名→id"）：本 op 经借位分配的局部变量——范围内未用 id，
     /// 纯外观风险（报错文案打印成别人的名字——findings 2026-09-04 §五）。</summary>
     public List<string> BorrowedIds { get; set; } = new();
+    /// <summary>#34 热分配字符串明细（"内容→id"）：本 op 引用的 boot 外新字符串——agent 在
+    /// commit 窗把块+新偏移表换入运行时（RE findings 2026-09-05：push.s 每次现查表，
+    /// 池=wad 映射零拷贝，追加=RCU 换表指针）。游戏重启后由新 data.win 的 STRG 接管。</summary>
+    public List<string> StrgAppended { get; set; } = new();
     /// <summary>#33 激活门 count patch：boot 帧局部数 0 + 载荷用局部时，commit 窗口把帧计数
     /// patch 到的值（0 = 本 op 无 patch）。全别名 node+0xA0/record+0x0C 同批写——
     /// invoker 每次调用读 node+0xA0 新建容器，count 唯一读者是激活门（==0 跳过）。</summary>

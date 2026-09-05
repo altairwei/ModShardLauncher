@@ -39,6 +39,10 @@ public sealed class Translator : IOperandResolver
     /// <summary>本 op 经借位分配的局部名 → id 明细（ApplyEngine 填进回执，MSL 侧可见）。</summary>
     public IReadOnlyDictionary<string, int> BorrowedLocals => borrowed;
 
+    /// <summary>#34 本 op 经 StrgAppendix 热分配的字符串 → id 明细（回执可见性，对齐 BorrowedLocals）。</summary>
+    public IReadOnlyList<(string Content, uint Id)> StrgAppended => strgAppended;
+    readonly List<(string, uint)> strgAppended = new();
+
     /// <summary>生产构造：全部留 null（从 AgentState/VarCalibrator/Registry/NodeIndex 静态取）。
     /// 测试经可选参数注入 fake。</summary>
     public Translator(OpMsg op,
@@ -146,7 +150,14 @@ public sealed class Translator : IOperandResolver
         var r = op.Strings.FirstOrDefault(x => x.Content == s.Content)
             ?? throw new TranslationRejectException($"string not in op table: '{s.Content}'");
         if (r.StrgIndex < 0)
-            throw new TranslationRejectException($"non-boot string: '{s.Content}'");
+        {
+            // #34：新字符串字面量——StrgAppendix 热分配 id（块+新表在 Enqueue 物化、
+            // Pump 换槽；旧语义「non-boot string 拒收」由附录失败路径接管）
+            uint id = StrgAppendix.Assign(s.Content);
+            if (!strgAppended.Any(x => x.Item1 == s.Content))
+                strgAppended.Add((s.Content, id));
+            return (int)id;
+        }
         return r.StrgIndex;   // 运行时 stringId == boot STRG 索引（S2 ③ 1:1）
     }
 
