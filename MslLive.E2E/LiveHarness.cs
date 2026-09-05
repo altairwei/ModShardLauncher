@@ -84,6 +84,21 @@ public sealed class LiveHarness : IDisposable
         return HotPipeline.BuildAndPush(product, Sandbox.DataWin);
     }
 
+    /// <summary>E2E-G（mod 升级形态）：product 加 product-only 新脚本（AddFunction——
+    /// 依赖者先注册，与 ZDT 的 DevTools.cs 同款顺序约束）+ 探针改体调用它——一批同时
+    /// 含槽 op（新脚本热加）与 swap op（探针），CodeDiffer/BuildBatch 全生产路径。</summary>
+    public HotPushResult PushProbeWithNewScript(string newScriptName, string newScriptBody, string probeBody)
+    {
+        var product = LoadFresh(Sandbox.DataWin);
+        DataLoader.data = product;
+        Msl.AddFunction(newScriptBody, newScriptName);   // 先注册：探针体的裸名调用此刻解析
+        var code = product.Code.First(c => c.Name.Content == TestDataBuilder.ProbeScript);
+        code.ReplaceGML(probeBody, product);
+        using (var s = File.Create(Sandbox.DataWin))
+            UndertaleIO.Write(s, product);
+        return HotPipeline.BuildAndPush(product, Sandbox.DataWin);
+    }
+
     /// <summary>等观察者落盘期望值（热换体后下一帧生效）。超时返回当前值/null 供断言诊断。</summary>
     public string? WaitResult(string expected, int timeoutMs = 20000)
     {

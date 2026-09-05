@@ -121,5 +121,28 @@ public class E2ETests : IDisposable
             "新字符串热语义断裂（观测=" + got + "，期望 " + fresh + "）\n" + h.Diagnostics());
     }
 
+    /// <summary>「mod 升级」完整形态验收（E2E-G，真机 09:53 场景的沙箱复现）：同批 =
+    /// 新脚本（product-only → msl_slot_N 槽热加）+ 既有探针改体（调新脚本）+ 新字符串。
+    /// 真机那批 39 entries 整批被 getseed 拒——16 个槽 op 从未 commit 过，槽路径的
+    /// apply 从未在真 VM 执行（此前只有单测）；本测试一石三鸟：槽换入 + 跨槽调用
+    /// （call.i → 槽名操作数解析）+ StrgAppendix 同批。观测 = 新脚本 return 的新字符串。</summary>
+    [E2EFact]
+    public void NewScriptViaSlot_CalledFromProbe_WithFreshString()
+    {
+        h.Boot("slot_fresh");
+
+        const string fresh = "fix34g_槽上新生";
+        var r = h.PushProbeWithNewScript(
+            newScriptName: "scr_e2e_newcmd",
+            newScriptBody: "function scr_e2e_newcmd() { return \"" + fresh + "\"; }",
+            probeBody: "function scr_e2e_probe() { return scr_e2e_newcmd(); }");
+
+        Assert.True(r.Attempted, "热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(r.Succeeded, "热推失败：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        string? got = h.WaitResult(fresh);
+        Assert.True(got == fresh,
+            "新脚本槽热语义断裂（观测=" + got + "，期望 " + fresh + "）\n" + h.Diagnostics());
+    }
+
     public void Dispose() => h.Dispose();
 }
