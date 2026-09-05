@@ -175,6 +175,36 @@ public class ApplyEngineTests : IDisposable
         Assert.True(ApplyEngine.TryTakeReceipt()!.AllOk);
     }
 
+    /// <summary>#35（真机 14:10 实弹）：#33 patch 只写活内存——同会话重推同条目时，
+    /// 镜像检查/patch 资格若读 NodeIndex 的 boot 快照（0）比 patch 后活体（1）→
+    /// "locals mismatch" 整批误拒（13:32 批次 patch 过 getseed，14:10 重推同款即中招）。
+    /// 修复后：活体内存两侧互比（镜像不变量本身）+ 资格判定读活体 → 重推过 + 幂等
+    /// （已开的门不再 patch，LocalsPatched=0）。</summary>
+    [Fact]
+    public void Enqueue_PatchThenRepush_SameSession_MirrorUsesLive()
+    {
+        PlantNode(Node, Record, Name, Buf, "entry_a", locals: 0);
+        NodeIndex.Build();
+        var op = PopzOp("entry_a", 1);
+        op.LocalsCount = 2;
+        Assert.Null(ApplyEngine.Enqueue(Batch(op)));       // 第一次：patch 资格成立
+        ApplyEngine.Pump();
+        Assert.Equal(2u, R32(Node + 0xA0));                // patch 落地（活内存双侧）
+        Assert.Equal(2u, R32(Record + 0x0C));
+        Assert.True(ApplyEngine.TryTakeReceipt()!.AllOk);
+
+        // 第二次推送同条目（同 NodeIndex——快照仍停 boot 值 0，模拟真机重推）
+        var again = PopzOp("entry_a", 1);
+        again.LocalsCount = 2;
+        Assert.Null(ApplyEngine.Enqueue(Batch(again)));    // 旧代码在此「locals mismatch: node 0 != record+0x0C 2」
+        ApplyEngine.Pump();
+        Assert.Equal(2u, R32(Node + 0xA0));                // 幂等：已开的门不被重写
+        var receipt = ApplyEngine.TryTakeReceipt();
+        Assert.NotNull(receipt);
+        Assert.True(receipt!.AllOk);
+        Assert.Equal(0u, Assert.Single(receipt.Ops).LocalsPatched);
+    }
+
     /// <summary>#30-D 防御 + #33 结局更新：谎 LocalsCount=0（旧编译器对函数形子条目恒 0，
     /// probe6 实证）不可信——patch 资格判定必须直检载荷 sems（-7 引用）；借位池非空时
     /// 借位照常 + patch max(0,1)=1（count 除非零外无语义）。</summary>

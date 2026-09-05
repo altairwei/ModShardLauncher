@@ -121,6 +121,27 @@ public class E2ETests : IDisposable
             "新字符串热语义断裂（观测=" + got + "，期望 " + fresh + "）\n" + h.Diagnostics());
     }
 
+    /// <summary>fix #35 验收（E2E-H，真机 14:10 场景的沙箱复现）：#33 激活门 patch 只写
+    /// 活内存——同会话重推同条目时，镜像检查/patch 资格若读 boot 快照则「locals mismatch」
+    /// 整批拒。两次推送同探针（均带 var 局部 = patch 载体）：第一次 patch 落地、第二次必须
+    /// 依然过（活体镜像 1==1）且幂等（已开的门不重写）。观测先 7 后 9 = 两代换入体都真执行。</summary>
+    [E2EFact]
+    public void SameEntry_RepushAfterPatch_StillApplies()
+    {
+        h.Boot("repush");
+
+        var r1 = h.PushProbeBody("function scr_e2e_probe() { var _x = 7; return _x; }");
+        Assert.True(r1.Attempted && r1.Succeeded,
+            "首推失败：" + string.Join("；", r1.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("7") == "7", "首推观测≠7\n" + h.Diagnostics());
+
+        var r2 = h.PushProbeBody("function scr_e2e_probe() { var _y = 9; return _y; }");
+        Assert.True(r2.Attempted, "重推未启动：" + string.Join("；", r2.Failures) + "\n" + h.Diagnostics());
+        Assert.True(r2.Succeeded,
+            "重推失败（14:10 形态：locals mismatch 误拒）：" + string.Join("；", r2.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("9") == "9", "重推观测≠9\n" + h.Diagnostics());
+    }
+
     /// <summary>「mod 升级」完整形态验收（E2E-G，真机 09:53 场景的沙箱复现）：同批 =
     /// 新脚本（product-only → msl_slot_N 槽热加）+ 既有探针改体（调新脚本）+ 新字符串。
     /// 真机那批 39 entries 整批被 getseed 拒——16 个槽 op 从未 commit 过，槽路径的

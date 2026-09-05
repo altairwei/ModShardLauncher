@@ -237,14 +237,28 @@ public static unsafe class Mem
         return Encoding.ASCII.GetString(buf, 0, n);
     }
 
-    /// <summary>整块读（proof 读回活 buffer 用）。守卫失败 → 空数组（fail-closed：调用方按长度不符处理）。</summary>
+    /// <summary>整块读（proof 读回活 buffer 用）。守卫失败 → 空数组（fail-closed：调用方按长度不符处理）。
+    /// TestMap 模式下假分配地址（TestAllocs）也可读——#35 重推用例：首次 commit 把 buffer/
+    /// 表换到假分配地址，二次推送的自证要能读回它们（生产对应物是真分配内存，天然可读）。</summary>
     public static byte[] ReadBytes(ulong addr, int len)
     {
         if (len <= 0 || addr == 0) return Array.Empty<byte>();
+        if (TestMap != null)
+        {
+            if (TestAllocs.TryGetValue(addr, out var alloc))
+            {
+                var b = new byte[Math.Min(len, alloc.Length)];
+                Array.Copy(alloc, b, b.Length);
+                return b;
+            }
+            if (!Readable(addr, len)) return Array.Empty<byte>();
+            var tb = new byte[len];
+            Array.Copy(TestMap, (int)(addr - TestBase), tb, 0, len);
+            return tb;
+        }
         if (!Readable(addr, len)) return Array.Empty<byte>();
         var buf = new byte[len];
-        if (TestMap != null) Array.Copy(TestMap, (int)(addr - TestBase), buf, 0, len);
-        else Marshal.Copy((nint)addr, buf, 0, len);
+        Marshal.Copy((nint)addr, buf, 0, len);
         return buf;
     }
 

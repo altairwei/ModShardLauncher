@@ -234,17 +234,22 @@ public static class ApplyEngine
         // 新建局部容器，count(+0x5C) 唯一读者是激活门（==0 → 局部访问整条静默跳过）——
         // 不约束 map 容量（find-or-create）、不约束帧栈分配、GC/析构/struct 主线全不看。
         // N=max(LocalsCount,1)（MSL 救援层对函数形谎 0 已兜底 ≥1；count 除非零外无语义）。
-        // 镜像一致性（下方检查）先核后 patch：全别名 node+0xA0 与 record+0x0C 同批写，
-        // 否则下一次推送会被我们自己的镜像检查拒掉。
+        // #35（真机 14:10 实弹）：资格判定与镜像检查一律读活体内存（node+0xA0 直读），
+        // 不读 NodeIndex 的 boot 快照——#33 patch 只写活内存，快照停在 boot 值，同会话
+        // 重推同条目时快照(0) vs patch 后活体(N) 会被自己的镜像检查误拒（13:32 批次
+        // patch 过 getseed，14:10 重推同款即中招）。NodeInfo.Locals 保持 boot 快照语义。
+        uint frameOwnerLive = Mem.ReadU32(frameOwner.Node + 0xA0);
         uint localsPatch = 0;
-        if ((payloadUsesLocals || op.LocalsCount > 0) && frameOwner.Locals == 0)
+        if ((payloadUsesLocals || op.LocalsCount > 0) && frameOwnerLive == 0)
             localsPatch = (uint)Math.Max(op.LocalsCount, 1);
-        // 镜像完整性：全部别名的 node+0xA0 与各自 record+0x0C 必须一致（交换面双侧真源同源）
+        // 镜像完整性：全部别名的活体两侧 node+0xA0 与 record+0x0C 必须一致（装载期
+        // 双侧写的同源镜像 + #33 patch 双侧写保持的不变量——与快照无关）
         foreach (var a in aliases)
         {
+            uint nodeLocals = Mem.ReadU32(a.Node + 0xA0);
             uint recordLocals = Mem.ReadU32(a.Record + 0x0C);
-            if (recordLocals != a.Locals)
-            { receipt.Reason = $"locals mismatch: node {a.Locals} != record+0x0C {recordLocals}"; return null; }
+            if (recordLocals != nodeLocals)
+            { receipt.Reason = $"locals mismatch: node 0x{a.Node:X} {nodeLocals} != record+0x0C {recordLocals}"; return null; }
         }
         // #19 真机自证（fail-closed）：任一共享记录已特化（+0x20≠0）就按旧 buffer 重算
         // 表/pcmap 与活表逐字节比对——不等 = 特化规则复刻错了，换入即野派发，整批拒
