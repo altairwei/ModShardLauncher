@@ -448,8 +448,9 @@ public class E2ETests : IDisposable
         Assert.True(h.WaitResult("888") == "888", "M11 删除后观测通道死\n" + h.Diagnostics());
     }
 
-    /// <summary>M12：unchanged 重推（同体再推，0 变更）。
-    /// AppliedEntries=0 的成功语义要钉清——不是错误，不是 no-op，是合法的空推送。</summary>
+    /// <summary>M12：同会话同体重推（首推 333 生效后再推 333）。
+    /// diff 仍是 boot(111)→product(333) 的同一 op——#35 幂等接受路径的 E2E 化：
+    /// agent 镜像检查发现 live 已是目标体 → 接受而非误拒。观测值不变（仍是 333）。</summary>
     [E2EFact]
     public void M12_UnchangedRepush()
     {
