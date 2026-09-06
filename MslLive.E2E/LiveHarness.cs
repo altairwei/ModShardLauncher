@@ -6,6 +6,8 @@ using System.Threading;
 using ModShardLauncher;
 using ModShardLauncher.HotReload;
 using UndertaleModLib;
+using UndertaleModLib.Models;
+using Xunit;
 
 namespace MslLive.E2E;
 
@@ -75,13 +77,64 @@ public sealed class LiveHarness : IDisposable
     /// 另读是正确性要求：boot 基线持有独立图，若原地改 boot 图 diff 会看不见变化。</summary>
     public HotPushResult PushProbeBody(string newBody)
     {
+        return PushProduct(product =>
+        {
+            var code = product.Code.First(c => c.Name.Content == TestDataBuilder.ProbeScript);
+            code.ReplaceGML(newBody, product);
+        });
+    }
+
+    /// <summary>泛化推送入口：另读 product → 执行任意编辑（回调内可 ReplaceGML/AddFunction/
+    /// 编辑对象事件/编辑 RoomCC/删条目）→ 落盘 → BuildAndPush。所有矩阵格的公共底座。</summary>
+    public HotPushResult PushProduct(Action<UndertaleData> mutate)
+    {
         var product = LoadFresh(Sandbox.DataWin);
         DataLoader.data = product;   // ReplaceGML/Msl 原语绑定 ModLoader.Data
-        var code = product.Code.First(c => c.Name.Content == TestDataBuilder.ProbeScript);
-        code.ReplaceGML(newBody, product);
+        mutate(product);
         using (var s = File.Create(Sandbox.DataWin))
             UndertaleIO.Write(s, product);
         return HotPipeline.BuildAndPush(product, Sandbox.DataWin);
+    }
+
+    /// <summary>编辑对象事件（M2/M3）：按事件类型+子类型定位 Code 条目并 ReplaceGML。</summary>
+    public HotPushResult EditObjectEvent(string objName, EventType evType, uint evSubtype, string newBody)
+    {
+        return PushProduct(product =>
+        {
+            string entryName = $"gml_Object_{objName}_{evType}_{evSubtype}";
+            var code = product.Code.FirstOrDefault(c => c.Name.Content == entryName)
+                ?? throw new InvalidOperationException($"seed 缺 {entryName}——TestDataBuilder 未建该事件");
+            code.ReplaceGML(newBody, product);
+        });
+    }
+
+    /// <summary>编辑 RoomCC（M4）：START 房的 CreationCodeId 条目换体。</summary>
+    public HotPushResult EditRoomCC(string roomName, string newBody)
+    {
+        return PushProduct(product =>
+        {
+            var room = product.Rooms.First(r => r.Name.Content == roomName);
+            var cc = room.CreationCodeId
+                ?? throw new InvalidOperationException($"seed 缺 {roomName} 的 CreationCodeId——TestDataBuilder 未建");
+            cc.ReplaceGML(newBody, product);
+        });
+    }
+
+    /// <summary>删除脚本条目（M11）：从 product 移除 Code/Scripts/Functions 三处引用。</summary>
+    public HotPushResult DeleteScript(string scriptName)
+    {
+        return PushProduct(product =>
+        {
+            // Code 层（根 + 子）
+            var codes = product.Code.Where(c => c.Name.Content.Contains(scriptName)).ToList();
+            foreach (var c in codes) product.Code.Remove(c);
+            // Scripts 层
+            var scripts = product.Scripts.Where(s => s.Name.Content.Contains(scriptName)).ToList();
+            foreach (var s in scripts) product.Scripts.Remove(s);
+            // Functions 层
+            var fns = product.Functions.Where(f => f.Name.Content.Contains(scriptName)).ToList();
+            foreach (var f in fns) product.Functions.Remove(f);
+        });
     }
 
     /// <summary>E2E-G（mod 升级形态）：product 加 product-only 新脚本（AddFunction——
@@ -89,14 +142,32 @@ public sealed class LiveHarness : IDisposable
     /// 含槽 op（新脚本热加）与 swap op（探针），CodeDiffer/BuildBatch 全生产路径。</summary>
     public HotPushResult PushProbeWithNewScript(string newScriptName, string newScriptBody, string probeBody)
     {
-        var product = LoadFresh(Sandbox.DataWin);
-        DataLoader.data = product;
-        Msl.AddFunction(newScriptBody, newScriptName);   // 先注册：探针体的裸名调用此刻解析
-        var code = product.Code.First(c => c.Name.Content == TestDataBuilder.ProbeScript);
-        code.ReplaceGML(probeBody, product);
-        using (var s = File.Create(Sandbox.DataWin))
-            UndertaleIO.Write(s, product);
-        return HotPipeline.BuildAndPush(product, Sandbox.DataWin);
+        return PushProduct(product =>
+        {
+            Msl.AddFunction(newScriptBody, newScriptName);   // 先注册：探针体的裸名调用此刻解析
+            var code = product.Code.First(c => c.Name.Content == TestDataBuilder.ProbeScript);
+            code.ReplaceGML(probeBody, product);
+        });
+    }
+
+    /// <summary>拒批后健康断言：确认拒批不毒化管道——再推一个平凡编辑仍成功。
+    /// 边界格的必备验证（拒批是合法出口，但拒批后管道必须还能用）。</summary>
+    public void AssertPipelineHealthyAfterRejection()
+    {
+        var r = PushProbeBody("function " + TestDataBuilder.ProbeScript + "() { return 999; }");
+        Assert.True(r.Attempted, "拒批后管道未启动：" + string.Join("；", r.Failures));
+        Assert.True(r.Succeeded, "拒批后管道已毒化（平凡编辑失败）：" + string.Join("；", r.Failures));
+        Assert.True(WaitResult("999") == "999", "拒批后观测通道已死：" + Diagnostics());
+    }
+
+    /// <summary>global 中继观测（M2/M3/M4）：等 global.e2e_target / global.e2e_roomcc 等
+    /// 被对象事件/RoomCC 写入后出现在观测文件。观测通道 = oBoot Step 每帧调聚合探针，
+    /// 聚合探针体里拼 global 值——M2/M3/M4 的断言目标。</summary>
+    public string? WaitGlobalResult(string globalName, string expected, int timeoutMs = 20000)
+    {
+        // global 中继的观测值嵌在聚合探针返回串里（"probe_g|probe_a|probe_long|global_name=value"）
+        // 简化：直接等观测文件包含期望值（聚合探针体在推送时改写，把 global 值拼进去）
+        return WaitResult(expected, timeoutMs);
     }
 
     /// <summary>等观察者落盘期望值（热换体后下一帧生效）。超时返回当前值/null 供断言诊断。</summary>
