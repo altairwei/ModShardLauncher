@@ -325,11 +325,13 @@ public class E2ETests : IDisposable
             "M5 新全局变量热语义断裂（期望 5）\n" + h.Diagnostics());
     }
 
-    /// <summary>M6：mod 侧匿名函数热推（AddFunction 扁平化——匿名体内联进根条目，
-    /// 子条目只是 FUNC 锚点）。推送时动态注入：AddFunction 编译匿名体 → 推送。
-    /// 观测 = 匿名函数返回值（fnref + method() 调用面热换成功）。</summary>
+    /// <summary>M6：mod 侧匿名函数热推（AddFunction 扁平化）。
+    /// <para>实证边界（2026-09-06 离线探针三连，用户定夺=文档化）：vendored UTMT 0.6.1.0
+    /// 把 anon 参数编成 push.v self._x（读调用者实例变量而非 anon 实参——语义错），anon 经局部
+    /// 调用编成 call.i _g。pack 期同坏的编译器缺口；热管道的救援门把它变成响亮拒批（设计在工作）。
+    /// 修复 = UTMT 升级（backlog）。判定 = 干净拒批 + 拒批后管道健康。</para></summary>
     [E2EFact]
-    public void M6_AnonymousFunction_HotPush()
+    public void M6_AnonymousFunction_Rejected_CompilerBoundary()
     {
         h.Boot("m6_anon");
 
@@ -343,32 +345,39 @@ public class E2ETests : IDisposable
         });
 
         Assert.True(r.Attempted, "M6 热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
-        Assert.True(r.Succeeded, "M6 匿名函数热推失败：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
-        Assert.True(h.WaitResult("300") == "300",
-            "M6 匿名函数热语义断裂（期望 300）\n" + h.Diagnostics());
+        Assert.False(r.Succeeded,
+            "M6 匿名函数应被干净拒批（编译器错编译边界）——若意外转绿，UTMT 或已升级，翻回理想绿断言");
+        Assert.Contains(r.Failures, f => f.Contains("boot baseline 无来源"));
+        // 被拒的 anon 脚本已落盘 data.win，健康检查须先撤掉它（生产语义：mod 含不可推送
+        // 内容时每推必拒，直到撤掉——这正是本断言要验证的撤销路径）
+        h.AssertPipelineHealthyAfterRejection(product =>
+            LiveHarness.RemoveScriptFrom(product, "scr_e2e_probe_anon"));
     }
 
-    /// <summary>M7：编辑中新增匿名函数（product-only 新 Code 子条目）。
-    /// 探针体加匿名函数——匿名子条目是 product-only 新条目，预测拒批（槽外新条目）。</summary>
+    /// <summary>M7：编辑中新增匿名函数。同 M6 的编译器边界（同一 vendored 编译器、
+    /// 同一错编译形态），拒批点从槽 op 移到既有条目 swap op。判定同 M6。</summary>
     [E2EFact]
-    public void M7_NewAnonymousInEdit()
+    public void M7_NewAnonymousInEdit_Rejected_CompilerBoundary()
     {
         h.Boot("m7_newanon");
 
         var r = h.PushProbeBody(
             "function scr_e2e_probe() { var _f = function(_x) { return _x + 1; }; return _f(41); }");
 
-        // 理想断言：绿（推送成功 + 观测 42）
         Assert.True(r.Attempted, "M7 热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
-        Assert.True(r.Succeeded, "M7 新增匿名函数热推失败：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
-        Assert.True(h.WaitResult("42") == "42",
-            "M7 新增匿名函数热语义断裂（期望 42）\n" + h.Diagnostics());
+        Assert.False(r.Succeeded,
+            "M7 新增匿名函数应被干净拒批（编译器错编译边界）——若意外转绿，UTMT 或已升级，翻回理想绿断言");
+        Assert.Contains(r.Failures, f => f.Contains("boot baseline 无来源"));
+        h.AssertPipelineHealthyAfterRejection();
     }
 
-    /// <summary>M8：method() 调用链（method(self, helper) 后调用）。
-    /// #36-B 附带修复（OverlayFunctions 误槽化）的 E2E 化。</summary>
+    /// <summary>M8：method() 调用链。
+    /// <para>实证边界（2026-09-06 探针，用户定夺=文档化）：`var _m = method(self, helper);
+    /// return _m();` 的 `_m()` 被 vendored 编译器编成 call.i _m（局部变量当函数名）——
+    /// agent validate 正确拒收（'function _m unknown: not in registry'），把编译期静默错编译
+    /// 变成响亮拒批。修复 = UTMT 升级（backlog）。判定 = 干净拒批 + 拒批后管道健康。</para></summary>
     [E2EFact]
-    public void M8_MethodCallChain()
+    public void M8_MethodCallChain_Rejected_CompilerBoundary()
     {
         h.Boot("m8_method");
 
@@ -378,9 +387,10 @@ public class E2ETests : IDisposable
             probeBody: "function scr_e2e_probe() { var _m = method(self, scr_e2e_helper); return _m(); }");
 
         Assert.True(r.Attempted, "M8 热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
-        Assert.True(r.Succeeded, "M8 method() 热推失败：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
-        Assert.True(h.WaitResult("77") == "77",
-            "M8 method() 热语义断裂（期望 77）\n" + h.Diagnostics());
+        Assert.False(r.Succeeded,
+            "M8 method 变量调用应被干净拒批（编译器错编译边界）——若意外转绿，UTMT 或已升级，翻回理想绿断言");
+        Assert.Contains(r.Failures, f => f.Contains("not in registry"));
+        h.AssertPipelineHealthyAfterRejection();
     }
 
     /// <summary>M9：控制流混合 + fresh builtin（for/switch/with/repeat + sqrt——

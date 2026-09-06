@@ -123,18 +123,22 @@ public sealed class LiveHarness : IDisposable
     /// <summary>删除脚本条目（M11）：从 product 移除 Code/Scripts/Functions 三处引用。</summary>
     public HotPushResult DeleteScript(string scriptName)
     {
-        return PushProduct(product =>
-        {
-            // Code 层（根 + 子）
-            var codes = product.Code.Where(c => c.Name.Content.Contains(scriptName)).ToList();
-            foreach (var c in codes) product.Code.Remove(c);
-            // Scripts 层
-            var scripts = product.Scripts.Where(s => s.Name.Content.Contains(scriptName)).ToList();
-            foreach (var s in scripts) product.Scripts.Remove(s);
-            // Functions 层
-            var fns = product.Functions.Where(f => f.Name.Content.Contains(scriptName)).ToList();
-            foreach (var f in fns) product.Functions.Remove(f);
-        });
+        return PushProduct(product => RemoveScriptFrom(product, scriptName));
+    }
+
+    /// <summary>从 product 移除名为 scriptName 的脚本（Code 根+子 / Scripts / Functions 三层）。
+    /// 既是 DeleteScript 的实现，也是边界格 cleanup 回调的构件（撤销被拒的新增脚本）。</summary>
+    public static void RemoveScriptFrom(UndertaleData product, string scriptName)
+    {
+        // Code 层（根 + 子）
+        var codes = product.Code.Where(c => c.Name.Content.Contains(scriptName)).ToList();
+        foreach (var c in codes) product.Code.Remove(c);
+        // Scripts 层
+        var scripts = product.Scripts.Where(s => s.Name.Content.Contains(scriptName)).ToList();
+        foreach (var s in scripts) product.Scripts.Remove(s);
+        // Functions 层
+        var fns = product.Functions.Where(f => f.Name.Content.Contains(scriptName)).ToList();
+        foreach (var f in fns) product.Functions.Remove(f);
     }
 
     /// <summary>E2E-G（mod 升级形态）：product 加 product-only 新脚本（AddFunction——
@@ -151,10 +155,19 @@ public sealed class LiveHarness : IDisposable
     }
 
     /// <summary>拒批后健康断言：确认拒批不毒化管道——再推一个平凡编辑仍成功。
-    /// 边界格的必备验证（拒批是合法出口，但拒批后管道必须还能用）。</summary>
-    public void AssertPipelineHealthyAfterRejection()
+    /// 边界格的必备验证（拒批是合法出口，但拒批后管道必须还能用）。
+    /// cleanup：被拒内容已落盘 data.win（PushProduct 先写盘后推送），健康检查推送会
+    /// 重新 diff 到它——若被拒内容不是「探针体整体替换」能自愈的形态（如 AddFunction
+    /// 新增脚本），须传 cleanup 把它从 product 撤掉再验证（对应生产语义：mod 含有不可
+    /// 推送内容时每次推送都会拒，直到 mod 撤掉该内容）。</summary>
+    public void AssertPipelineHealthyAfterRejection(Action<UndertaleData>? cleanup = null)
     {
-        var r = PushProbeBody("function " + TestDataBuilder.ProbeScript + "() { return 999; }");
+        var r = PushProduct(product =>
+        {
+            cleanup?.Invoke(product);
+            var code = product.Code.First(c => c.Name.Content == TestDataBuilder.ProbeScript);
+            code.ReplaceGML("function " + TestDataBuilder.ProbeScript + "() { return 999; }", product);
+        });
         Assert.True(r.Attempted, "拒批后管道未启动：" + string.Join("；", r.Failures));
         Assert.True(r.Succeeded, "拒批后管道已毒化（平凡编辑失败）：" + string.Join("；", r.Failures));
         Assert.True(WaitResult("999") == "999", "拒批后观测通道已死：" + Diagnostics());
