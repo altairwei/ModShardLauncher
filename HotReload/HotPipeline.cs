@@ -100,6 +100,9 @@ public static class HotPipeline
         // find-or-create + map 存储（RE findings 2026-09-05：静态 id 的层链槽数组无写时
         // 扩容，动态 API 是唯一对 boot 前旧实例有效的路径）。
         RewriteNewInstanceVars(product, boot, changed, out int ivarRewrites);
+        // fix #37（E2E 矩阵 M5，用户批准）：全局域同族救援——global.X ↔ variable_global_set/get。
+        // 跟在实例域之后跑：同一 entry 两类新变量各由各自 pass 处理（正则锚定域前缀，正交）。
+        RewriteNewGlobalVars(product, boot, changed, out int gvarRewrites);
         foreach (var entry in changed)
         {
             if (ReferenceEquals(entry, stepEntry)) continue;
@@ -416,6 +419,87 @@ public static class HotPipeline
             entry.Product.ReplaceGML(gml, product);
             Log.Information("[live] {0}: 新实例变量 '{1}' 引用改写为动态 API（源码层反编译→替换→重编译，" +
                 "运行时按名字走符号注册+map——静态 id 槽数组无写时扩容，fix #36-B）",
+                entry.Name, string.Join("/", present));
+            rewriteCount++;
+        }
+    }
+
+    /// <summary>fix #37 判别子：product Global-VARI − boot Global-VARI 差集 = 本批新全局变量名。
+    /// 与 #36-B 的 DeclaredInstanceVars 同型，但全局名不与 var 局部交叠（局部无 global. 前缀），
+    /// 无需排局部名集。</summary>
+    static HashSet<string> DeclaredGlobalVars(UndertaleData product, UndertaleData boot)
+    {
+        var bootGlobal = new HashSet<string>();
+        foreach (var v in boot.Variables)
+            if (v.InstanceType == UndertaleInstruction.InstanceType.Global)
+                bootGlobal.Add(v.Name.Content);
+        var names = new HashSet<string>();
+        foreach (var v in product.Variables)
+            if (v.InstanceType == UndertaleInstruction.InstanceType.Global
+                && !bootGlobal.Contains(v.Name.Content))
+                names.Add(v.Name.Content);
+        return names;
+    }
+
+    /// <summary>fix #37 源码层救援（#36-B 同族 Global 域变体）：新全局变量的引用改写为官方动态
+    /// API（读 variable_global_get(名字) argc=1；写 variable_global_set(名字, 值) argc=2）。
+    /// 在 BuildSwapOp 之前对「载荷引用了新全局变量的 changed entry」反编译 → 文本替换 →
+    /// ReplaceGML 重编译，后续管线（提取/校准/编码）走既有路径不动。正则锚定 global. 前缀，
+    /// 与同名实例变量/局部正交。复合形态（数组壳/字符串字面量含名）同 #36-B 守卫——不匹配
+    /// 即跳过，残留引用走原拒批路径（诚实边界）。槽 entry（Baseline==null）同 #36-B 不重写。</summary>
+    static void RewriteNewGlobalVars(UndertaleData product, UndertaleData boot,
+        List<ChangedEntry> changed, out int rewriteCount)
+    {
+        rewriteCount = 0;
+        var gvars = DeclaredGlobalVars(product, boot);
+        if (gvars.Count == 0) return;
+        foreach (var entry in changed)
+        {
+            // 只重写 baseline 既有 entry（swap 目标）——槽 entry 边界同 #36-B（ReplaceGML 对
+            // AddFunction wrapper 子条目结构重排会 IndexOutOfRange）
+            if (entry.Baseline == null) continue;
+            // 本 entry 的载荷确实引用了新全局变量才重写
+            var present = gvars.Where(n => entry.Product.Instructions.Any(i =>
+                (i.Value as UndertaleInstruction.Reference<UndertaleVariable>)?.Target?.Name?.Content == n ||
+                i.Destination?.Target?.Name?.Content == n)).ToList();
+            if (present.Count == 0) continue;
+            string gml = UndertaleModLib.Decompiler.Decompiler.Decompile(entry.Product,
+                new UndertaleModLib.Decompiler.GlobalDecompileContext(product, false));
+            // 数组壳/代码内字符串字面量守卫同 #36-B：不匹配就跳过，残留走原拒批路径
+            var quoted = gvars.Where(n => gml.Contains($"\"{n}\"", StringComparison.Ordinal)).ToList();
+            if (gml.Contains('[') || quoted.Count > 0)
+            {
+                Log.Information("[live] {0}: 新全局变量 '{1}' 的 entry 含数组壳/代码内字符串字面量{2}——" +
+                    "跳过重写（正则重写会撕碎结构；引用残留走原拒批路径，fix #37 诚实边界）",
+                    entry.Name, string.Join("/", present),
+                    quoted.Count > 0 ? $"（字面量含名：{string.Join("/", quoted)}）" : "");
+                continue;
+            }
+            // 写先行（整行吃掉左值与右值）：`global.NAME = EXPR`（行尾）→ set("NAME", EXPR)。
+            // placeholder 保护同 #36-B（regex 不识别字符串字面量，防 replacement 里的 "NAME"
+            // 被读轮二次命中）。
+            var placeholders = new List<(string Token, string Name)>();
+            foreach (var n in present)
+            {
+                string token = $"MSLGVAR{placeholders.Count:X4}TOKEN";
+                placeholders.Add((token, n));
+                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}\s*=\s*(.+)",
+                    $"variable_global_set(\"{token}\", $1)");
+            }
+            // 读（剩余 global.NAME 裸引用）→ get("NAME")
+            foreach (var n in present)
+                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}(?![A-Za-z0-9_(])",
+                    $"variable_global_get(\"{n}\")");
+            foreach (var (token, n) in placeholders)
+                gml = gml.Replace(token, n);
+            // 删旧子条目再重编译（旧编译器 wrapper 自绑定尾巴问题同 #36-B 处置）
+            var oldChildren = product.Code
+                .Where(c => c.ParentEntry == entry.Product && c != entry.Product).ToList();
+            foreach (var child in oldChildren)
+                product.Code.Remove(child);
+            entry.Product.ReplaceGML(gml, product);
+            Log.Information("[live] {0}: 新全局变量 '{1}' 引用改写为动态 API（源码层反编译→替换→重编译，" +
+                "运行时按名字走全局符号注册——静态 id 槽数组无写时扩容，fix #37 与 #36-B 同族）",
                 entry.Name, string.Join("/", present));
             rewriteCount++;
         }

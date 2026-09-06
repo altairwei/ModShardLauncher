@@ -87,12 +87,14 @@ public class HotPipelineTests : IDisposable
             && c.Variables.Contains("msl_probe_step"));
     }
 
-    /// <summary>#21 fail-closed：编辑引入 baseline 从未见过的变量名 → 整批不推 + 原因含变量名
-    /// 与重启指引（_ally_hp 事故的正解——宁可拒批也不带模拟值错装）。
-    /// #30 起本用例钉 i:/g: 半边（global. → "g:"：共享容器，借位 = 与既有变量同槽别名 =
-    /// 静默错值，仍拒）；l: 半边已放行，见 <see cref="ChangedEntry_NewLocalName_NotRejected"/>。</summary>
+    /// <summary>#21 fail-closed 历史锚点（演化链：#21 新变量名全拒 → #30 l: 放行 → #36-B
+    /// i: 救援 → #37 g: 救援）。#37（用户批准）起，编辑引入 baseline 从未见过的全局变量名
+    /// 改写为 variable_global_set(名字, 值)——不再拒批。本用例载荷为混合形态（loader 调用 +
+    /// 新全局写）：改写不得扰动 msl_live_apply() 调用，新全局名不得残留 g: 键引用。
+    /// 剩余拒批面 = 槽 entry（见 <see cref="NewScriptSlot_NewGlobalVar_Rejected_HonestBoundary"/>）
+    /// 与数组壳/字符串字面量守卫跳过后的自然拒批。</summary>
     [Fact]
-    public void ChangedEntry_NewVariableName_RejectedHonestly()
+    public void ChangedEntry_NewGlobalVar_RescuedByDynamicApi()
     {
         var boot = Load();
         LiveStubInjector.Inject(boot, new LiveQuotas());
@@ -102,8 +104,14 @@ public class HotPipelineTests : IDisposable
         target.ReplaceGML("msl_live_apply();\nglobal.msl_never_seen_xyz = 1;", product);
         var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
             new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
-        Assert.Null(r.Batch);
-        Assert.Contains(r.Failures, f => f.Contains("msl_never_seen_xyz") && f.Contains("重启"));
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Entry == "gml_Object_o_msl_live_Step_0");
+        // 新全局名不再以 g: 键引用（CalibCorpus 拒批面解除）
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "msl_never_seen_xyz");
+        Assert.DoesNotContain("msl_never_seen_xyz", op.Variables);
+        // 改写形态：variable_global_set(名字, 值) argc=2，名字落字符串表
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_set" && i.Low16 == 2);
+        Assert.Contains(op.Strings, s => s.Content == "msl_never_seen_xyz");
     }
 
     /// <summary>#30：新增局部变量名（boot baseline 无来源）不再拒批——l: miss 由 agent
@@ -299,6 +307,52 @@ public class HotPipelineTests : IDisposable
         Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_get" && i.Low16 == 2);
         Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_set" && i.Low16 == 3);
         Assert.Contains(op.Strings, s => s.Content == "fresh_van_ivar");
+    }
+
+    /// <summary>fix #37（E2E 矩阵 M5 触发，用户批准）：新全局变量（product Global-VARI −
+    /// boot Global-VARI 差集判别）的引用改写为官方动态 API——读 variable_global_get(名字)
+    /// argc=1；写 variable_global_set(名字, 值) argc=2。与 #36-B 同族（源码层反编译→文本
+    /// 替换→重编译），改写后载荷不再引用新全局变量名（CalibCorpus g: 键拒批面解除）。
+    /// 正则锚定 global. 前缀——与同名实例变量正交（#36-B 的 lookbehind 已排除点号后名）。</summary>
+    [Fact]
+    public void VanillaEdit_NewGlobalVar_RewrittenToDynamicApi()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("global.fresh_e2e_gvar = 5;\nreturn global.fresh_e2e_gvar * 2;", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_e2e_gvar");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_get" && i.Low16 == 1);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_set" && i.Low16 == 2);
+        Assert.Contains(op.Strings, s => s.Content == "fresh_e2e_gvar");
+    }
+
+    /// <summary>fix #37 槽载荷边界（#36-B 同型）：product-only 槽 entry（新脚本）不走源码层
+    /// 重写（ReplaceGML 对 AddFunction wrapper 的子条目结构重排会 IndexOutOfRange），引用新
+    /// 全局变量 → 原拒批路径放行（重启游戏后由正常载入覆盖）。</summary>
+    [Fact]
+    public void NewScriptSlot_NewGlobalVar_Rejected_HonestBoundary()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        Msl.AddFunction("function scr_slot_gvar() { global.fresh_slot_gvar = 41;\nreturn global.fresh_slot_gvar + 1; }", "scr_slot_gvar");
+        var caller = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
+        caller.ReplaceGML("msl_live_apply();\nscr_slot_gvar();", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.Null(r.Batch);   // 整批不推（fail-closed）
+        Assert.Contains(r.Failures, f => f.Contains("fresh_slot_gvar") && f.Contains("boot baseline 无来源"));
     }
 
     /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由

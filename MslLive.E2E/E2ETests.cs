@@ -308,8 +308,8 @@ public class E2ETests : IDisposable
     }
 
     /// <summary>M5：新全局变量（global.e2e_fresh = 5; return global.e2e_fresh;）。
-    /// 预测今日拒批——#36-B 只救 Self 域（实例变量），Global 域是另一条路径。
-    /// 若拒批 → 诚实边界（#37 候选：variable_global_set/get 救援）。</summary>
+    /// fix #37（用户批准，与 #36-B 同族）：源码层改写 variable_global_set/get——
+    /// 首扫如预测拒批（#36-B 只救 Self 域），#37 落地后转绿。</summary>
     [E2EFact]
     public void M5_FreshGlobalVariable()
     {
