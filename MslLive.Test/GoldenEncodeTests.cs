@@ -76,7 +76,7 @@ public class GoldenEncodeTests
     {
         public int ResolveString(StrRef s) => 0;
         public int ResolveCall(string fn) => 0xDEAD;
-        public uint ResolveVar(string name, short instType) => 0xDEAD;
+        public uint ResolveVar(string name, short instType, byte refTop) => 0xDEAD;
         public int ResolveAsset(AssetRef a) => (int)a.Index;
     }
 
@@ -124,7 +124,7 @@ public class GoldenEncodeTests
             Strings.TryGetValue(s.Content, out int id) ? id : throw new Xunit.Sdk.XunitException($"unmapped string '{s.Content}'");
         public int ResolveCall(string fn) =>
             Calls.TryGetValue(fn, out int id) ? id : throw new Xunit.Sdk.XunitException($"unmapped call '{fn}'");
-        public uint ResolveVar(string name, short instType) =>
+        public uint ResolveVar(string name, short instType, byte refTop) =>
             Vars.TryGetValue(name, out uint id) ? id : throw new Xunit.Sdk.XunitException($"unmapped var '{name}'");
         public int ResolveAsset(AssetRef a) => throw new Xunit.Sdk.XunitException("golden entry has no asset refs");
     }

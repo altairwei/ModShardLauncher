@@ -142,6 +142,49 @@ public class E2ETests : IDisposable
         Assert.True(h.WaitResult("9") == "9", "重推观测≠9\n" + h.Diagnostics());
     }
 
+    /// <summary>fix #36-B 验收（E2E-I，真机 16:06 场景的沙箱复现）：新实例变量（boot 无
+    /// VARI 来源）的引用经 MSL 救援改写为动态 API（variable_instance_get/set 按名字走
+    /// 运行时符号注册 + map 存储）——agent 零改动、对 boot 前旧实例天然有效。观测 42 =
+    /// 写（set 经中转局部）+ 读（get）+ 算术全对；旧语义这里整批拒（共享容器红线）。</summary>
+    [E2EFact]
+    public void NewInstanceVar_RescuedViaDynamicApi()
+    {
+        h.Boot("fresh_ivar");
+
+        var r = h.PushProbeBody(
+            "function scr_e2e_probe() { fresh_ivar_val = 41;\nreturn fresh_ivar_val + 1; }");
+
+        Assert.True(r.Attempted, "热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(r.Succeeded, "热推失败：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("42") == "42",
+            "新实例变量热语义断裂（期望 42）\n" + h.Diagnostics());
+    }
+
+    /// <summary>fix #36-B 对照实验（逐指令二分）：手写产物形态正确（Push String + Conv s.v +
+    /// Call——与 boot 观察者一致）但运行时断 → 问题在编码字节层。三轮逐层：
+    /// ① 数字参数内置调用（abs）；② 变量传字符串（string_length(变量)）；③ 字面量传串（已知断）。</summary>
+    [E2EFact]
+    public void DynamicApi_LayeredControl()
+    {
+        h.Boot("dyn_api_ctl");
+
+        var r1 = h.PushProbeBody("function scr_e2e_probe() { return abs(-4); }");
+        Assert.True(r1.Succeeded, "① 推送失败：" + string.Join("；", r1.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("4") == "4",
+            "① 数字参数内置调用断裂（期望 4）\n" + h.Diagnostics());
+
+        var r2 = h.PushProbeBody(
+            "function scr_e2e_probe() { var _s = \"boot\";\nreturn string_length(_s); }");
+        Assert.True(r2.Succeeded, "② 推送失败：" + string.Join("；", r2.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("4") == "4",
+            "② 变量传字符串断裂（期望 4）\n" + h.Diagnostics());
+
+        var r3 = h.PushProbeBody("function scr_e2e_probe() { return string_length(\"boot\"); }");
+        Assert.True(r3.Succeeded, "③ 推送失败：" + string.Join("；", r3.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("4") == "4",
+            "③ 字面量传字符串断裂（期望 4）\n" + h.Diagnostics());
+    }
+
     /// <summary>「mod 升级」完整形态验收（E2E-G，真机 09:53 场景的沙箱复现）：同批 =
     /// 新脚本（product-only → msl_slot_N 槽热加）+ 既有探针改体（调新脚本）+ 新字符串。
     /// 真机那批 39 entries 整批被 getseed 拒——16 个槽 op 从未 commit 过，槽路径的

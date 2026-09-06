@@ -188,6 +188,33 @@ public class TranslatorTests
         Assert.Contains("not calibrated", ex.Message);
     }
 
+    /// <summary>fix #36-B：wrapper 自绑定尾巴（pop.v.v [stacktop]self.F + popz 丢弃——
+    /// RefTop=0x80 栈顶槽 + inst=0）是写后死代码，运行时不查符号表。未校准命中即尾巴，
+    /// 操作数给 dead 占位（low24=0x0D），RefTop 原样保留——不再按普通变量拒批
+    /// （E2E fresh_ivar 沙箱：重写后根重编译的尾巴引用 "目标名_函数名" 无 baseline 来源）。</summary>
+    [Fact]
+    public void Var_SelfBindingTail_StacktopPop_DeadPlaceholder()
+    {
+        var sem = new SemInstruction
+        { Kind = BcEncoder.OpPop, T1 = BcEncoder.TVariable, T2 = BcEncoder.TVariable, Inst = 0, Var = "scr_x_scr_x", RefTop = 0x80 };
+        byte[] b = EncodeOne(sem, Make());
+        Assert.Equal(0x8000000Du, BitConverter.ToUInt32(b, 4));   // RefTop 0x80 保留 + dead 占位 0x0D
+    }
+
+    /// <summary>同名字但非尾巴形态（pop 但 RefTop=0xA0 正常槽 / inst=-1 实例域 pop）→
+    /// 照旧拒——尾巴豁免严格限界在「pop + inst=0 + RefTop=0x80」的签名上。push+0x80 是
+    /// 合法的 [stacktop] 读取（Var_StacktopForm 用例的校准路径）——不属于拒绝面。</summary>
+    [Fact]
+    public void Var_SameName_NonTailForms_StillReject()
+    {
+        var exPop = Assert.Throws<TranslationRejectException>(() => EncodeOne(
+            new SemInstruction { Kind = BcEncoder.OpPop, T1 = BcEncoder.TVariable, T2 = BcEncoder.TVariable, Inst = 0, Var = "scr_x_scr_x", RefTop = 0xA0 }, Make()));
+        Assert.Contains("not calibrated", exPop.Message);
+        var exInst = Assert.Throws<TranslationRejectException>(() => EncodeOne(
+            new SemInstruction { Kind = BcEncoder.OpPop, T1 = BcEncoder.TVariable, T2 = BcEncoder.TVariable, Inst = -1, Var = "scr_x_scr_x", RefTop = 0x80 }, Make()));
+        Assert.Contains("not calibrated", exInst.Message);
+    }
+
     [Fact]
     public void Call_Builtin_RegistryRawIndex()
     {

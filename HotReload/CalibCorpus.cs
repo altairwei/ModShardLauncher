@@ -51,6 +51,11 @@ public static class CalibCorpus
             foreach (var sem in op.Instructions)
             {
                 if (sem.Var == null || BuiltinVars.Map.ContainsKey(sem.Var)) continue;
+                // wrapper 自绑定尾巴（pop.v.v [stacktop]self.F + popz 丢弃）：RefTop=0x80
+                // （StackTop 槽）是铁律签名——真变量写入是 0xA0（Normal）。尾巴是写后死
+                // 代码，运行时不经符号注册（给 F 编语料既无必要也无来源——fix #36-B：重写
+                // 后根重编译的尾巴引用 "目标名_函数名" 形态被拒批，E2E fresh_ivar 实证）。
+                if (sem.Kind == 0x45 && sem.RefTop == 0x80) continue;   // 0x45=pop
                 string k = KeyFor(sem.Inst, sem.Var);
                 keys.Add(k);
                 remaining.Add(k);

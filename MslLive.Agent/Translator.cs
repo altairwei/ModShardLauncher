@@ -64,7 +64,7 @@ public sealed class Translator : IOperandResolver
     internal static string KeyFor(short inst, string name) =>
         (inst == -5 ? "g:" : inst == -7 ? "l:" : "i:") + name;
 
-    public uint ResolveVar(string name, short instType)
+    public uint ResolveVar(string name, short instType, byte refTop)
     {
         // 内置变量：exe 固定表 raw smallId（无 100000 偏置——S2 黄金实测
         // argument0=0x5D / sprite_index=0x1A / object_index=0x0E / image_* 全族）
@@ -76,6 +76,13 @@ public sealed class Translator : IOperandResolver
         string? alt = key[0] == 'l' ? null : key[0] == 'i' ? "g:" + name : "i:" + name;
         if (calibrated.TryGetValue(key, out int id) || (alt != null && calibrated.TryGetValue(alt, out id)))
             return (uint)(100000 + id);
+        // wrapper 自绑定尾巴（pop.v.v [stacktop]self.F + popz 丢弃——RefTop=0x80 栈顶槽）
+        // 是写后死代码：pop 的写从不被读，VM 从不拿这个名字查符号表。MSL 侧 CalibCorpus
+        // 已把尾巴从语料需求集剔除——未校准命中即尾巴，操作数给静态占位（VM 加载照
+        // 重写 low24，执行面无消费）。fix #36-B：源码层重写后根重编译，尾巴引用
+        // "目标名_函数名" 无 baseline 来源（E2E fresh_ivar 实证）。
+        if (instType == 0 && refTop == 0x80)
+            return 0x00000D;   // dead 占位（low24 13，与原 0x?000DEAD 同族——从未被读）
         // #30 借位 id：l: miss 不再拒——局部容器每次调用新建（invoker 0x14028B5C0 尾段
         // ctor(node+0xA0)），局部 id 只是容器 map 的键，执行面不查全局符号表（findings
         // 2026-09-04 §一/§四）。当场分配一个「既有符号表范围内」的未用 id：范围内借位 =
@@ -135,13 +142,13 @@ public sealed class Translator : IOperandResolver
     public int ResolveCall(string fn)
     {
         int idx = registryIndexOf(fn);
-        if (idx >= 0) return idx;   // 内置/原生函数：注册表原始索引，无偏置（Task 11 新发现 3）
-        // 脚本：活体校准优先——操作数 = 100000+脚本表序，≠ node+0x88 的 CODE 索引
-        // （E2E seed 首证两空间分离；真机 CODE 序巧合重合。见 CallCalibrator）
+        if (idx >= 0)
+            return idx;   // 内置/原生函数：注册表原始索引，无偏置（Task 11 新发现 3）
         if (callCalibrated.TryGetValue(fn, out int sid))
             return 100000 + sid;
         int? codeId = scriptCodeId(fn);
-        if (codeId != null) return 100000 + codeId.Value;   // 兜底：真机 CODE 序巧合下正确（无语料命中时不回归）
+        if (codeId != null)
+            return 100000 + codeId.Value;
         throw new TranslationRejectException($"function '{fn}' unknown: not in registry, not calibrated, not in node index");
     }
 

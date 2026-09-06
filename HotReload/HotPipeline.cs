@@ -94,6 +94,12 @@ public static class HotPipeline
 
         // ---- code entries（ManagerStepEntry 单独处理：有 loader 时由 trigger/restore 覆盖）----
         var stepEntry = changed.FirstOrDefault(e => e.Name == LiveStubInjector.ManagerStepEntry);
+        // fix #36-B（真机 16:06 实弹形态）：新实例变量的引用改写为官方动态 API——源码层
+        // 重写（反编译 → 文本替换 → 重编译），编译器编排全部调用细节（conv.s.v 物化、参数
+        // 逆序压栈——arg0 在栈顶，vanilla ds_map_set 产物实证）。运行时按名字走符号
+        // find-or-create + map 存储（RE findings 2026-09-05：静态 id 的层链槽数组无写时
+        // 扩容，动态 API 是唯一对 boot 前旧实例有效的路径）。
+        RewriteNewInstanceVars(product, boot, changed, out int ivarRewrites);
         foreach (var entry in changed)
         {
             if (ReferenceEquals(entry, stepEntry)) continue;
@@ -227,7 +233,7 @@ public static class HotPipeline
                 ?? entry.Product.LocalsCount),
             Instructions = payload.Instructions,
             Variables = payload.Variables,   // 变量名不改写：#21 起 agent 以 CalibOps 语料收割的活体 id 解析，未覆盖即拒
-            Functions = OverlayFunctions(payload.Functions, bootFnNames, alloc),
+            Functions = OverlayFunctions(payload.Functions, bootFnNames, alloc, product),
         };
         if (slotTargeted)
         {
@@ -310,6 +316,109 @@ public static class HotPipeline
             any = true;
         }
         return any ? CalibCorpus.Build(boot, ops, resolver) : corpus;
+    }
+
+    /// <summary>fix #36-B 判别子：product Self-VARI − boot Self-VARI 差集 = 本批新实例变量名
+    /// （vari-probe 实证：新实例变量 VARI 条目 InstanceType=Self——autocomplete_list 等）。
+    /// 排除本 product 的 var 声明局部名：旧编译器给顶层语句上下文的 var 局部错发 Self 域
+    /// VARI（probe6/#30-D 实证），差集会混入局部名——重写它们会把 `var X;` 声明行也换
+    /// 成 dynamic API 调用 → 编译错（ChangedEntry_NewLocalName 回归实证）。局部名走
+    /// #30 借位路径，不属于本层。</summary>
+    static HashSet<string> DeclaredInstanceVars(UndertaleData product, UndertaleData boot)
+    {
+        var declaredLocals = new HashSet<string>(StringComparer.Ordinal);
+        if (product.CodeLocals != null)
+            foreach (var cl in product.CodeLocals)
+                foreach (var l in cl.Locals)
+                {
+                    string? n = l.Name?.Content;
+                    if (n != null && n != "arguments") declaredLocals.Add(n);
+                }
+        var bootSelf = new HashSet<string>();
+        foreach (var v in boot.Variables)
+            if (v.InstanceType == UndertaleInstruction.InstanceType.Self)
+                bootSelf.Add(v.Name.Content);
+        var names = new HashSet<string>();
+        foreach (var v in product.Variables)
+            if (v.InstanceType == UndertaleInstruction.InstanceType.Self
+                && !bootSelf.Contains(v.Name.Content)
+                && !declaredLocals.Contains(v.Name.Content))
+                names.Add(v.Name.Content);
+        return names;
+    }
+
+    /// <summary>fix #36-B 源码层救援：新实例变量的引用改写为官方动态 API（读
+    /// variable_instance_get(id, 名字)；写 variable_instance_set(id, 名字, 值)）。在
+    /// BuildSwapOp 之前对「载荷引用了新实例变量的 changed entry」反编译 → 文本替换 →
+    /// ReplaceGML 重编译——编译器编排全部调用细节（conv.s.v 字符串物化、参数逆序压栈，
+    /// 两者均为手写 sem 层的实证坑），后续管线（提取/校准/编码）走既有路径不动。
+    /// 复合形态（数组元素访问/复合赋值）正则不匹配 → 残留引用走原拒批路径（诚实边界）。</summary>
+    static void RewriteNewInstanceVars(UndertaleData product, UndertaleData boot,
+        List<ChangedEntry> changed, out int rewriteCount)
+    {
+        rewriteCount = 0;
+        var ivars = DeclaredInstanceVars(product, boot);
+        if (ivars.Count == 0) return;
+        foreach (var entry in changed)
+        {
+            // 只重写 baseline 既有 entry（swap 目标）：product-only 槽 entry（新脚本）的
+            // ReplaceGML 对子条目结构重排会 IndexOutOfRange（槽载荷本就是 AddFunction 建
+            // 的 wrapper——无 baseline 对应物，E2E NewScriptViaSlot 实证）。槽 entry 的新
+            // 实例变量引用走原拒批路径（诚实边界）。
+            if (entry.Baseline == null) continue;
+            // 本 entry 的载荷（product 字节码）确实引用了新实例变量才重写
+            var present = ivars.Where(n => entry.Product.Instructions.Any(i =>
+                (i.Value as UndertaleInstruction.Reference<UndertaleVariable>)?.Target?.Name?.Content == n ||
+                i.Destination?.Target?.Name?.Content == n)).ToList();
+            if (present.Count == 0) continue;
+            string gml = UndertaleModLib.Decompiler.Decompiler.Decompile(entry.Product,
+                new UndertaleModLib.Decompiler.GlobalDecompileContext(product, false));
+            // 数组壳（[）或代码字符串字面量包含变量名时，全局文本替换会撕碎结构（旧编译器
+            // 报 Expected local variable declaration / Expected assignment operator——
+            // fix #36-B ArrayLocal 回归实证）。此类 entry 不救——残留引用走原拒批路径
+            // （重启游戏后由正常载入覆盖，诚实边界）。
+            var quoted = ivars.Where(n => gml.Contains($"\"{n}\"", StringComparison.Ordinal)).ToList();
+            if (gml.Contains('[') || quoted.Count > 0)
+            {
+                Log.Information("[live] {0}: 新实例变量 '{1}' 的 entry 含数组壳/代码内字符串字面量{2}——" +
+                    "跳过重写（正则重写会撕碎结构；引用残留走原拒批路径，fix #36-B 诚实边界）",
+                    entry.Name, string.Join("/", present),
+                    quoted.Count > 0 ? $"（字面量含名：{string.Join("/", quoted)}）" : "");
+                continue;
+            }
+            // 写先行（整行吃掉左值与右值）：`NAME = EXPR`（行尾）→ set(id, "NAME", EXPR)。
+            // replacement 里的字面量 "NAME" 会被下一轮读正则命中（regex 不识别字符串字面量），
+            // 先用占位符保护、读轮后还原——set 行的 NAME 出现两次（左值 + 字面量），
+            // Regex.Replace 是全局的，左值进入占位符、字面量变 get → 双重嵌套编译错误。
+            var placeholders = new List<(string Token, string Name)>();
+            foreach (var n in present)
+            {
+                string token = $"MSLIVAR{placeholders.Count:X4}TOKEN";
+                placeholders.Add((token, n));
+                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}\s*=\s*(.+)",
+                    $"variable_instance_set(id, \"{token}\", $1)");
+            }
+            // 读（剩余裸引用）→ get(id, "NAME")
+            foreach (var n in present)
+                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}(?![A-Za-z0-9_(])",
+                    $"variable_instance_get(id, \"{n}\")");
+            foreach (var (token, n) in placeholders)
+                gml = gml.Replace(token, n);
+            // 旧编译器对重编译根的 wrapper 自绑定尾巴发成变量引用（实证：根重写后载荷多出
+            // "脚本名_函数名" 的 VARI 引用 + 新孙条目——UndertaleCode.cs:1585 探针），
+            // CalibCorpus 会拿它拒批。根重编译后删掉全部旧子条目（反编译根已把 wrapper 嵌进
+            // 正文，ReplaceGML 重建子代）——子条目本身从不引用实例变量，照常重编译即得
+            // 原生正确尾巴。
+            var oldChildren = product.Code
+                .Where(c => c.ParentEntry == entry.Product && c != entry.Product).ToList();
+            foreach (var child in oldChildren)
+                product.Code.Remove(child);
+            entry.Product.ReplaceGML(gml, product);
+            Log.Information("[live] {0}: 新实例变量 '{1}' 引用改写为动态 API（源码层反编译→替换→重编译，" +
+                "运行时按名字走符号注册+map——静态 id 槽数组无写时扩容，fix #36-B）",
+                entry.Name, string.Join("/", present));
+            rewriteCount++;
+        }
     }
 
     /// <summary>RunGml 三 op（Task 15 的 agent 语义）：trigger 把 step entry 换成
@@ -432,10 +541,23 @@ public static class HotPipeline
 
     /// <summary>product-only 函数名 → 槽（键 = ScriptSlotKey 形态，与调用点重定向同一键）；
     /// 列表值与 sems 重定向后同形（'gml_Script_' + 槽名）。boot 可解析（code 名 ∪ FUNC 名）
-    /// 的原样。</summary>
-    static List<string> OverlayFunctions(IReadOnlyList<string> names, HashSet<string> bootFnNames, SessionState alloc)
-        => names.Select(n => bootFnNames.Contains(n) ? n
-            : "gml_Script_" + alloc.AllocateScript(ScriptSlotKey(n))).ToList();
+    /// 的原样。fix #36-B（E2E abs(-4) 实弹：调用打 msl_slot_0 stub 返回 0）：「新脚本」判定
+    /// 收紧为 product 侧存在同名 Code entry（AddFunction 建全套 gml_Script_X/gml_GlobalScript_X）；
+    /// 仅 FUNC 引用（旧编译器把不认识的内置函数编成 FUNC 条目——abs/method/ds_list_* 家族，
+    /// funcs 审计的错编译形态）原样放行——agent 侧 registry 按运行时真序解析。旧判据
+    /// （bootFnNames 单查）会把全部内置函数调用误槽化 = 静默错值（_ally_hp 同族）。</summary>
+    static List<string> OverlayFunctions(IReadOnlyList<string> names, HashSet<string> bootFnNames,
+        SessionState alloc, UndertaleData product)
+    {
+        var productCodeNames = new HashSet<string>(product.Code.Select(c => c.Name.Content));
+        return names.Select(n =>
+        {
+            if (bootFnNames.Contains(n)) return n;
+            if (!productCodeNames.Contains(ScriptSlotKey(n)))
+                return n;   // 内置函数（无 product Code entry）：原样，agent registry 解析
+            return "gml_Script_" + alloc.AllocateScript(ScriptSlotKey(n));
+        }).ToList();
+    }
 
     /// <summary>资产引用翻译：baseline 区间恒等；新增区间按 kind 分配运行时载体
     /// （Sprite→空白 / Object→壳 / Room→空房间；其余 → OverlayException 需重启）。</summary>

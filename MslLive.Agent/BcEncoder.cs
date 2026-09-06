@@ -12,7 +12,7 @@ public interface IOperandResolver
 {
     int ResolveString(StrRef s);
     int ResolveCall(string fn);
-    uint ResolveVar(string name, short instType);
+    uint ResolveVar(string name, short instType, byte refTop);
     int ResolveAsset(AssetRef a);
 }
 
@@ -182,7 +182,7 @@ public static class BcEncoder
     static uint VarOperand(SemInstruction sem, IOperandResolver resolver)
     {
         if (sem.Var == null) throw new TranslationRejectException($"{OpName(sem.Kind)} variable operand without name");
-        uint low = resolver.ResolveVar(sem.Var, sem.Inst);
+        uint low = resolver.ResolveVar(sem.Var, sem.Inst, sem.RefTop);
         if (low >= 0x1000000) throw new TranslationRejectException($"var '{sem.Var}' resolved out of low24: {low}");
         return (uint)sem.RefTop << 24 | low;
     }

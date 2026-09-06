@@ -248,6 +248,59 @@ public class HotPipelineTests : IDisposable
         Assert.DoesNotContain(op.Instructions, i => i.Var == "_van_arr_local" && i.Inst == 0);
     }
 
+    /// <summary>fix #36-B（真机 16:06 实弹形态）：新实例变量（product Self-VARI − boot
+    /// Self-VARI 差集判别——vari-probe 实证新实例变量 VARI 条目 = Self 域，与 var 局部的
+    /// Local 域正交）的引用改写为官方动态 API——RE findings 2026-09-05 §二/§三：静态 id
+    /// 走实例变量层的槽数组链（无写时扩容：读越层静默、写越层报错），动态 API 按名字走
+    /// 符号 find-or-create + map 存储，对 boot 前创建的旧实例天然有效（A/C 方案的死角）。
+    /// 读 = push.v self.id + push.s 名字 + call variable_instance_get(argc=2)；
+    /// 写 = 借位局部中转 + push.v self.id + push.s 名字 + pushloc 中转 + call
+    /// variable_instance_set(argc=3)。改写后载荷不再引用新实例变量名（CalibCorpus 自然
+    /// 放行——16:06 的「共享容器无法安全借位」拒绝面解除）。</summary>
+    /// <summary>fix #36-B 槽载荷边界：product-only 槽 entry（新脚本）不走源码层重写
+    /// （ReplaceGML 对其子条目结构重排会 IndexOutOfRange——槽载荷是 AddFunction 建的
+    /// wrapper，无 baseline 对应物，E2E NewScriptViaSlot 实证），引用新实例变量 →
+    /// 原拒批路径放行（共享容器红线——重启游戏后由正常载入覆盖）。</summary>
+    [Fact]
+    public void NewScriptSlot_NewInstanceVar_Rejected_HonestBoundary()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        Msl.AddFunction("function scr_slot_ivar() { fresh_slot_ivar = 41;\nreturn fresh_slot_ivar + 1; }", "scr_slot_ivar");
+        var caller = product.Code.First(c => c.Name.Content == "gml_Object_o_msl_live_Step_0");
+        caller.ReplaceGML("msl_live_apply();\nscr_slot_ivar();", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.Null(r.Batch);   // 整批不推（fail-closed）
+        Assert.Contains(r.Failures, f => f.Contains("fresh_slot_ivar") && f.Contains("boot baseline 无来源"));
+    }
+
+    /// <summary>fix #36-B vanilla 面（真机 16:06 的 o_devconsole 形态）：既有对象事件的
+    /// 新实例变量（读 + 写 + 跨事件共享语义）同样改写；中转变量走 #30 借位局部。</summary>
+    [Fact]
+    public void VanillaEdit_NewInstanceVar_RewrittenToDynamicApi()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("fresh_van_ivar = 5;\nreturn fresh_van_ivar * 2;", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_van_ivar");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_get" && i.Low16 == 2);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_set" && i.Low16 == 3);
+        Assert.Contains(op.Strings, s => s.Content == "fresh_van_ivar");
+    }
+
     /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由
     /// 被换 entry 自身的 baseline 版供——语料必须含目标 entry 自己（agent 在换入前收割其
     /// 换装前活 buffer，时序安全）。</summary>
