@@ -309,6 +309,75 @@ public class HotPipelineTests : IDisposable
         Assert.Contains(op.Strings, s => s.Content == "fresh_van_ivar");
     }
 
+    /// <summary>fix #40（真机 00:21 实弹形态，o_devconsole_Create_0）：entry 无任何代码层
+    /// 数组访问，仅因无关字符串字面量含 '['（"[DevTools] " 日志前缀）被 #36-B 守卫整 entry
+    /// 连坐跳过 → 残留引用整批拒批（同批 Draw_64 同名变量的成功改写被连带作废）。'['] 检查
+    /// 须查剥串文本——数组壳是代码层结构，字符串里的 '[' 与两轮改写正则无任何交互。
+    /// 探针实证（真机产物反编译）：该 entry 恰 2 个 '[' 全在字符串内，剥串后 0。</summary>
+    [Fact]
+    public void VanillaEdit_FreshIVar_StringBracketLiteral_Rescued()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("fresh_str_ivar = 5;\nreturn string(fresh_str_ivar) + \"[DevTools] \";", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_str_ivar");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_set" && i.Low16 == 3);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_get" && i.Low16 == 2);
+        // 无关字符串字面量原样保留（含 '['）
+        Assert.Contains(op.Strings, s => s.Content == "[DevTools] ");
+    }
+
+    /// <summary>fix #40 quoted 半边收宽：名字嵌在更长字符串字面量内（非 "\"名\"" 整串形态）
+    /// ——读轮裸名正则会命中字符串内的名字，replacement 使引号失衡（旧编译器报错）。
+    /// 须在守卫层跳过，残留引用走原拒批路径。</summary>
+    [Fact]
+    public void VanillaEdit_FreshIVar_NameInsideStringLiteral_Rejected()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("fresh_in_str = 5;\nreturn \"see fresh_in_str for details\" + string(fresh_in_str);", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.Null(r.Batch);
+        Assert.Contains(r.Failures, f => f.Contains("fresh_in_str"));
+    }
+
+    /// <summary>fix #40 守卫保留面：真实代码层数组访问（剥串后仍有 '['）照旧跳过——数组壳
+    /// （[@...@@NewGMLArray@@...]）会被两轮正则撕碎，保守边界不动。</summary>
+    [Fact]
+    public void VanillaEdit_FreshIVar_CodeLayerArray_StillRejected()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("var _arr;\n_arr[0] = 3;\nfresh_arr_ivar = 5;\nreturn fresh_arr_ivar + _arr[0];", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.Null(r.Batch);
+        Assert.Contains(r.Failures, f => f.Contains("fresh_arr_ivar"));
+    }
+
     /// <summary>fix #37（E2E 矩阵 M5 触发，用户批准）：新全局变量（product Global-VARI −
     /// boot Global-VARI 差集判别）的引用改写为官方动态 API——读 variable_global_get(名字)
     /// argc=1；写 variable_global_set(名字, 值) argc=2。与 #36-B 同族（源码层反编译→文本
@@ -353,6 +422,30 @@ public class HotPipelineTests : IDisposable
             new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
         Assert.Null(r.Batch);   // 整批不推（fail-closed）
         Assert.Contains(r.Failures, f => f.Contains("fresh_slot_gvar") && f.Contains("boot baseline 无来源"));
+    }
+
+    /// <summary>fix #40 全局域同修（#37 守卫与 #36-B 同型）：字符串字面量含 '[' 不得连坐
+    /// 新全局变量救援（真机形态同 VanillaEdit_FreshIVar_StringBracketLiteral_Rescued）。</summary>
+    [Fact]
+    public void VanillaEdit_FreshGVar_StringBracketLiteral_Rescued()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("global.fresh_str_gvar = 5;\nreturn string(global.fresh_str_gvar) + \"[DevTools] \";", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_str_gvar");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_set" && i.Low16 == 2);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_get" && i.Low16 == 1);
+        Assert.Contains(op.Strings, s => s.Content == "[DevTools] ");
     }
 
     /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由

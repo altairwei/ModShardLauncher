@@ -350,6 +350,19 @@ public static class HotPipeline
         return names;
     }
 
+    /// <summary>fix #40：守卫的字符串字面量视图。旧反编译器只输出双引号字面量（\" 转义）；
+    /// 未终止引号等异常形态正则不匹配 → 内容保留在剥串文本 → 守卫照旧触发（fail-safe
+    /// 方向不变）。</summary>
+    static readonly Regex StringLiteralRegex =
+        new("\"(?:[^\"\\\\]|\\\\.)*\"", RegexOptions.Compiled);
+
+    /// <summary>fix #40（真机 00:21，o_devconsole_Create_0 实弹）：'['] 守卫查剥串文本。
+    /// 数组壳是代码层结构；字符串字面量里的 '['（"[DevTools] "）与两轮改写正则无任何
+    /// 交互——entry 无任何数组访问时不得因日志前缀字符串被整 entry 连坐（该真机批
+    /// Draw_64 的成功改写被连带作废）。</summary>
+    static string StripStringLiterals(string gml) =>
+        StringLiteralRegex.Replace(gml, "\"\"");
+
     /// <summary>fix #36-B 源码层救援：新实例变量的引用改写为官方动态 API（读
     /// variable_instance_get(id, 名字)；写 variable_instance_set(id, 名字, 值)）。在
     /// BuildSwapOp 之前对「载荷引用了新实例变量的 changed entry」反编译 → 文本替换 →
@@ -376,15 +389,20 @@ public static class HotPipeline
             if (present.Count == 0) continue;
             string gml = UndertaleModLib.Decompiler.Decompiler.Decompile(entry.Product,
                 new UndertaleModLib.Decompiler.GlobalDecompileContext(product, false));
-            // 数组壳（[）或代码字符串字面量包含变量名时，全局文本替换会撕碎结构（旧编译器
-            // 报 Expected local variable declaration / Expected assignment operator——
-            // fix #36-B ArrayLocal 回归实证）。此类 entry 不救——残留引用走原拒批路径
-            // （重启游戏后由正常载入覆盖，诚实边界）。
-            var quoted = ivars.Where(n => gml.Contains($"\"{n}\"", StringComparison.Ordinal)).ToList();
-            if (gml.Contains('[') || quoted.Count > 0)
+            // 守卫须感知字符串字面量（fix #40，真机 00:21 o_devconsole_Create_0 实弹）：
+            // ① '['] 只查剥串文本——数组壳（[@...@@NewGMLArray@@...]）是代码层结构，会被
+            //    两轮正则撕碎（fix #36-B ArrayLocal 回归实证）；字符串字面量里的 '['
+            //    与改写正则无任何交互，不得整 entry 连坐。
+            // ② 名字检查收宽为「present 名出现在任何字符串字面量内」——旧 "\"名\"" 整串
+            //    形态漏掉嵌在更长字符串里的名字（读轮裸名正则会命中它，replacement 使
+            //    引号失衡）。两形态命中任一都不救——残留引用走原拒批路径（诚实边界）。
+            var literals = StringLiteralRegex.Matches(gml)
+                .Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value).ToList();
+            var quoted = present.Where(n => literals.Any(v => v.Contains(n, StringComparison.Ordinal))).ToList();
+            if (StripStringLiterals(gml).Contains('[') || quoted.Count > 0)
             {
-                Log.Information("[live] {0}: 新实例变量 '{1}' 的 entry 含数组壳/代码内字符串字面量{2}——" +
-                    "跳过重写（正则重写会撕碎结构；引用残留走原拒批路径，fix #36-B 诚实边界）",
+                Log.Information("[live] {0}: 新实例变量 '{1}' 的 entry 含代码层数组壳/字符串字面量含名{2}——" +
+                    "跳过重写（正则重写会撕碎结构；引用残留走原拒批路径，fix #36-B/#40 诚实边界）",
                     entry.Name, string.Join("/", present),
                     quoted.Count > 0 ? $"（字面量含名：{string.Join("/", quoted)}）" : "");
                 continue;
@@ -465,12 +483,16 @@ public static class HotPipeline
             if (present.Count == 0) continue;
             string gml = UndertaleModLib.Decompiler.Decompiler.Decompile(entry.Product,
                 new UndertaleModLib.Decompiler.GlobalDecompileContext(product, false));
-            // 数组壳/代码内字符串字面量守卫同 #36-B：不匹配就跳过，残留走原拒批路径
-            var quoted = gvars.Where(n => gml.Contains($"\"{n}\"", StringComparison.Ordinal)).ToList();
-            if (gml.Contains('[') || quoted.Count > 0)
+            // 守卫同 #36-B（fix #40 字符串字面量感知）：'['] 查剥串文本（数组壳是代码层
+            // 结构，字符串里的 '[' 无害）；名字查「present 名出现在任何字符串字面量内」
+            // （读轮正则会撕碎含名字符串）。不匹配才改写，否则残留走原拒批路径。
+            var literals = StringLiteralRegex.Matches(gml)
+                .Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value).ToList();
+            var quoted = present.Where(n => literals.Any(v => v.Contains(n, StringComparison.Ordinal))).ToList();
+            if (StripStringLiterals(gml).Contains('[') || quoted.Count > 0)
             {
-                Log.Information("[live] {0}: 新全局变量 '{1}' 的 entry 含数组壳/代码内字符串字面量{2}——" +
-                    "跳过重写（正则重写会撕碎结构；引用残留走原拒批路径，fix #37 诚实边界）",
+                Log.Information("[live] {0}: 新全局变量 '{1}' 的 entry 含代码层数组壳/字符串字面量含名{2}——" +
+                    "跳过重写（正则重写会撕碎结构；引用残留走原拒批路径，fix #37/#40 诚实边界）",
                     entry.Name, string.Join("/", present),
                     quoted.Count > 0 ? $"（字面量含名：{string.Join("/", quoted)}）" : "");
                 continue;

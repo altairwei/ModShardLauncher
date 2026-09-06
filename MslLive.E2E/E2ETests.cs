@@ -509,5 +509,24 @@ public class E2ETests : IDisposable
             "M13 厨房水槽热语义断裂（期望 ks_新字符串）\n" + h.Diagnostics());
     }
 
+    /// <summary>M14（fix #40 验收，真机 00:21 场景的沙箱复现）：新实例变量 + 无关字符串
+    /// 字面量含 '['（"[DevTools] " 日志前缀——o_devconsole_Create_0 实弹形态，该真机
+    /// entry 无任何数组访问却被 '['] 守卫整 entry 连坐拒批）。观测 "6[DevTools]"（观测
+    /// 通道 Trim 尾空格）= 动态 API 写读 + 字符串拼接（含 #34 运行时 STRG 追加的新串）
+    /// 全对。</summary>
+    [E2EFact]
+    public void M14_FreshIVarWithStringBracketLiteral()
+    {
+        h.Boot("m14_str_bracket");
+
+        var r = h.PushProbeBody(
+            "function scr_e2e_probe() { fresh_str_ivar = 6;\nreturn string(fresh_str_ivar) + \"[DevTools] \"; }");
+
+        Assert.True(r.Attempted, "M14 热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(r.Succeeded, "M14 热推失败（00:21 形态：字符串 '[' 连坐拒批）：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("6[DevTools]") == "6[DevTools]",
+            "M14 字符串字面量含 '[' 的新实例变量热语义断裂（期望 6[DevTools]）\n" + h.Diagnostics());
+    }
+
     public void Dispose() => h.Dispose();
 }
