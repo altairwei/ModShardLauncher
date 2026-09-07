@@ -22,6 +22,9 @@ namespace ModShardLauncher
         internal static string savedDataPath = "";
         public delegate void FileMessageEventHandler(string message);
         public static event FileMessageEventHandler FileMessageEvent;
+        // [v2 Task 2] 装载指纹 + 装载完成事件（FastPushContext.OnDataReloaded 订阅；DataLoader 侧零耦合）
+        public static string? VanillaHash { get; internal set; }
+        internal static event Action? DataLoaded;
         public static void ShowWarning(string warning, string title)
         {
             Console.WriteLine(title + ":" + warning);
@@ -105,11 +108,11 @@ namespace ModShardLauncher
             File.WriteAllText("json_preset_crypt.json", Decompiler.Decompile(data.Code.First(t => t.Name.Content.Contains("scr_preset_crypt_1")), context));
         }
         /// <summary>
-        /// Compute the MD5 checksum of a file located in a FileStream.
+        /// Compute the MD5 hash (uppercase hex) of a file located in a FileStream.
         /// </summary>
         /// <param name="stream"></param>
         /// <returns></returns>
-        private static string ComputeChecksum(FileStream stream)
+        internal static string ComputeFileHash(FileStream stream)
         {
             using var md5 = MD5.Create();
             return Convert.ToHexString(md5.ComputeHash(stream));
@@ -117,11 +120,10 @@ namespace ModShardLauncher
         /// <summary>
         /// Return True if the MD5 checksum of a file is equal either to the MD5 checksum of the GOG data.win of Stoneshard or to the MD5 checksum of the STEAM data.win of Stoneshard.
         /// </summary>
-        /// <param name="stream"></param>
+        /// <param name="hash"></param>
         /// <returns></returns>
-        private static bool CompareChecksum(FileStream stream)
+        private static bool CompareChecksum(string hash)
         {
-            string hash = ComputeChecksum(stream);
             // Log.Information(hash); // uncomment to log the checksum of new versions and add to the array
             string[] checksums =
             {
@@ -133,14 +135,18 @@ namespace ModShardLauncher
             };
             return checksums.Contains(hash);
         }
-        private static bool LoadUmt(string filename)
+        // [v2 Task 2] private → internal：测试直驱真身装载（hadWarnings 非语义面）
+        internal static bool LoadUmt(string filename)
         {
             bool hadWarnings = false;
             // [v2 Task 1] 计时插桩：读+解压段（含 MD5）
             using (new HotReload.PhaseClock("LoadUmt(read+decompress)"))
             using (FileStream stream = new(filename, FileMode.Open, FileAccess.Read))
             {
-                if(!CompareChecksum(stream))
+                // [v2 Task 2] 哈希只算一次：指纹落 VanillaHash（无论白名单内外），CompareChecksum 改吃字符串
+                string hash = ComputeFileHash(stream);
+                VanillaHash = hash;
+                if (!CompareChecksum(hash))
                 {
                     Log.Warning("Checksum inconsistency, {{{0}}} may not be vanilla or is a new version.", filename);
                 }
@@ -163,6 +169,8 @@ namespace ModShardLauncher
 
             //UndertaleEmbeddedTexture.TexData.ClearSharedStream();
             Log.Information(string.Format("Successfully load: {0}.", filename));
+            // [v2 Task 2] 装载完成事件：工作图换血的唯一咽喉（FastPushContext.OnDataReloaded 订阅）
+            DataLoaded?.Invoke();
 
             return hadWarnings;
         }
