@@ -448,6 +448,104 @@ public class HotPipelineTests : IDisposable
         Assert.Contains(op.Strings, s => s.Content == "[DevTools] ");
     }
 
+    /// <summary>fix #41 复合赋值救援（真机 08:37 Draw_64 line33/col47 实弹）：老反编译器
+    /// accumulator 把 `NAME OP= EXPR` 折叠回原样文本，写轮 `\s*=` 不匹配（op 字符挡在
+    /// '=' 前）→ 漏到读轮 → `variable_instance_get(...) +=` 对函数调用复合赋值非法
+    /// （Malformed assignment statement）。救援轮展开：
+    /// `NAME OP= E` → set(id, "NAME", get(id, "NAME") OP (E))。</summary>
+    [Fact]
+    public void VanillaEdit_FreshIVar_CompoundAssign_Rescued()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("fresh_compound = 5;\nfresh_compound += 3;\nreturn string(fresh_compound);", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_compound");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_set" && i.Low16 == 3);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_get" && i.Low16 == 2);
+    }
+
+    /// <summary>fix #41 自增自减救援：accumulator 对 `x = x + 1` 的折叠形态是后缀
+    /// `x++`（真机 Draw_64 反编译 70/143 行实证），`+` 不在读轮排除集 → 漏到读轮产出
+    /// `get(...)++` 同样非法。救援轮：`NAME++/--` → set(+/- 1)。</summary>
+    [Fact]
+    public void VanillaEdit_FreshIVar_IncrementDecrement_Rescued()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("fresh_inc = 1;\nfresh_inc++;\nfresh_inc--;\nfresh_inc++;\nreturn string(fresh_inc);", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_inc");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_set" && i.Low16 == 3);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_get" && i.Low16 == 2);
+    }
+
+    /// <summary>fix #41 `==` 半匹配修复：`if (NAME == E)` 的裸 `=` 写轮会吃第一个 '='
+    /// 而 $1 捕获进 `= E)` ——产出 set(..., = E) 垃圾。修法 `=(?!=)` 前瞻拒半匹配，
+    /// `==` 行漏到读轮 → `get(...) == E` 合法比较。</summary>
+    [Fact]
+    public void VanillaEdit_FreshIVar_EqEqComparison_Rescued()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("fresh_eq = 5;\nif (fresh_eq == 5)\n    return \"yes\";\nreturn \"no\";", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_eq");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_set" && i.Low16 == 3);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_instance_get" && i.Low16 == 2);
+        Assert.Contains(op.Strings, s => s.Content == "yes");
+    }
+
+    /// <summary>fix #41 全局域镜像（#37 同族）：`global.NAME OP= E` 复合赋值与
+    /// `global.NAME == E` 半匹配——救援/修法与实例域同型。</summary>
+    [Fact]
+    public void VanillaEdit_FreshGVar_CompoundAndEqEq_Rescued()
+    {
+        var boot = Load();
+        LiveStubInjector.Inject(boot, new LiveQuotas());
+        var product = Load();
+        LiveStubInjector.Inject(product, new LiveQuotas());
+        UndertaleCode bootEntry = boot.Code.First(c => c.ParentEntry == null
+            && c.Name.Content.StartsWith("gml_Object_")
+            && !c.Name.Content.StartsWith("gml_Object_o_msl_"));
+        product.Code.First(c => c.Name.Content == bootEntry.Name.Content)
+            .ReplaceGML("global.fresh_g_compound = 5;\nglobal.fresh_g_compound += 3;\nif (global.fresh_g_compound == 8)\n    return string(global.fresh_g_compound);\nreturn \"no\";", product);
+        var r = HotPipeline.BuildBatch(boot, product, NewAlloc(boot),
+            new List<LiveTextureEntry>(), new List<LiveTextureEntry>());
+        Assert.True(r.Batch != null, "批被拒：" + string.Join("；", r.Failures));
+        var op = Assert.Single(r.Batch!.Ops, o => o.Kind == "swap");
+        Assert.DoesNotContain(op.Instructions, i => i.Var == "fresh_g_compound");
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_set" && i.Low16 == 2);
+        Assert.Contains(op.Instructions, i => i.Fn == "variable_global_get" && i.Low16 == 1);
+    }
+
     /// <summary>#21 局部变量键域回归（_stagger_chance 类事故形态）：entry 唯一局部名只能由
     /// 被换 entry 自身的 baseline 版供——语料必须含目标 entry 自己（agent 在换入前收割其
     /// 换装前活 buffer，时序安全）。</summary>

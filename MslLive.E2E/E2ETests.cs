@@ -528,5 +528,21 @@ public class E2ETests : IDisposable
             "M14 字符串字面量含 '[' 的新实例变量热语义断裂（期望 6[DevTools]）\n" + h.Diagnostics());
     }
 
+    /// <summary>fix #41 真机形态回归（08:37 Draw_64）：新实例变量的复合赋值
+    /// （`fresh_ivar += 1`，老反编译器折叠回原样 → 写轮 OP= 展开救援）。</summary>
+    [E2EFact]
+    public void M15_FreshIVarCompoundAssign()
+    {
+        h.Boot("m15_compound");
+
+        var r = h.PushProbeBody(
+            "function scr_e2e_probe() { fresh_compound_ivar = 6;\nfresh_compound_ivar += 1;\nreturn string(fresh_compound_ivar); }");
+
+        Assert.True(r.Attempted, "M15 热通道未启动：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(r.Succeeded, "M15 热推失败（08:37 形态：复合赋值读轮撕裂 get(...)+=）：" + string.Join("；", r.Failures) + "\n" + h.Diagnostics());
+        Assert.True(h.WaitResult("7") == "7",
+            "M15 复合赋值新实例变量热语义断裂（期望 7）\n" + h.Diagnostics());
+    }
+
     public void Dispose() => h.Dispose();
 }

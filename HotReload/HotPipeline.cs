@@ -411,12 +411,30 @@ public static class HotPipeline
             // replacement 里的字面量 "NAME" 会被下一轮读正则命中（regex 不识别字符串字面量），
             // 先用占位符保护、读轮后还原——set 行的 NAME 出现两次（左值 + 字面量），
             // Regex.Replace 是全局的，左值进入占位符、字面量变 get → 双重嵌套编译错误。
+            // fix #41（真机 08:37 Draw_64 line33/col47 实弹）：老反编译器 accumulator 把
+            // 复合赋值/自增自减折叠回原样文本（`NAME OP= EXPR`、`NAME++`），裸 `=` 写轮
+            // 不匹配（op 字符挡在 '=' 前）→ 漏到读轮 → `get(...) OP=` / `get(...)++`
+            // 对函数调用赋值非法（Malformed assignment）。展开为 set(get OP (EXPR))——
+            // RHS 括号保语义（a += b+c → a = a + (b+c)）；set/get 名字参双写占位符，
+            // 读轮后一并还原。op 集合按 GMS1 二元运算全集（+ - * / % & | ^ << >>）防御，
+            // accumulator 只产出其子集，多写的分支不匹配而已。
             var placeholders = new List<(string Token, string Name)>();
             foreach (var n in present)
             {
                 string token = $"MSLIVAR{placeholders.Count:X4}TOKEN";
                 placeholders.Add((token, n));
-                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}\s*=\s*(.+)",
+                gml = Regex.Replace(gml,
+                    $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}\s*(<<|>>|[+\-*/%&|^])=\s*(.+)",
+                    $"variable_instance_set(id, \"{token}\", variable_instance_get(id, \"{token}\") $1 ($2))");
+                gml = Regex.Replace(gml,
+                    $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}\s*\+\+",
+                    $"variable_instance_set(id, \"{token}\", variable_instance_get(id, \"{token}\") + 1)");
+                gml = Regex.Replace(gml,
+                    $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}\s*--",
+                    $"variable_instance_set(id, \"{token}\", variable_instance_get(id, \"{token}\") - 1)");
+                // (?!=) 拒 `==` 半匹配（fix #41）：否则 `$1` 吃进 `= E)` 产出 set(..., = E)
+                // 垃圾；`==` 行漏到读轮 → `get(...) == E` 合法比较。
+                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.]){Regex.Escape(n)}\s*=(?!=)\s*(.+)",
                     $"variable_instance_set(id, \"{token}\", $1)");
             }
             // 读（剩余裸引用）→ get(id, "NAME")
@@ -499,13 +517,23 @@ public static class HotPipeline
             }
             // 写先行（整行吃掉左值与右值）：`global.NAME = EXPR`（行尾）→ set("NAME", EXPR)。
             // placeholder 保护同 #36-B（regex 不识别字符串字面量，防 replacement 里的 "NAME"
-            // 被读轮二次命中）。
+            // 被读轮二次命中）。fix #41 镜像：复合赋值/自增自减展开救援 + `==` 半匹配
+            // （`=(?!=)`）拒收——同实例域（真机 08:37 Draw_64 实弹驱动，全局域同族预防）。
             var placeholders = new List<(string Token, string Name)>();
             foreach (var n in present)
             {
                 string token = $"MSLGVAR{placeholders.Count:X4}TOKEN";
                 placeholders.Add((token, n));
-                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}\s*=\s*(.+)",
+                gml = Regex.Replace(gml,
+                    $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}\s*(<<|>>|[+\-*/%&|^])=\s*(.+)",
+                    $"variable_global_set(\"{token}\", variable_global_get(\"{token}\") $1 ($2))");
+                gml = Regex.Replace(gml,
+                    $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}\s*\+\+",
+                    $"variable_global_set(\"{token}\", variable_global_get(\"{token}\") + 1)");
+                gml = Regex.Replace(gml,
+                    $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}\s*--",
+                    $"variable_global_set(\"{token}\", variable_global_get(\"{token}\") - 1)");
+                gml = Regex.Replace(gml, $@"(?<![A-Za-z0-9_.])global\.{Regex.Escape(n)}\s*=(?!=)\s*(.+)",
                     $"variable_global_set(\"{token}\", $1)");
             }
             // 读（剩余 global.NAME 裸引用）→ get("NAME")
