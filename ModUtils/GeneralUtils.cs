@@ -17,19 +17,11 @@ namespace ModShardLauncher
     {
         public static FileEnumerable<string> LoadGML(string fileName)
         {
-            try 
+            try
             {
                 UndertaleCode code = GetUMTCodeFromFile(fileName);
-                GlobalDecompileContext context = new(ModLoader.Data, false);
-
-                // [v2 Task 1] 计时插桩：反编译段 + 计数
-                string text;
-                using (new HotReload.PhaseClock("decompile: " + fileName))
-                {
-                    text = Decompiler.Decompile(code, context);
-                    HotReload.PerfCounters.CountDecompile();
-                }
-
+                // [v2 Task 4] 读序改道 FastText.Read（终稿→缓存→工作图）；计时/计数随冷路径迁入其中
+                string text = HotReload.FastText.Read(code, fileName, PatchingWay.GML);
                 return new(
                     new(
                         fileName,
@@ -39,7 +31,7 @@ namespace ModShardLauncher
                     text.Split("\n")
                 );
             }
-            catch(Exception ex) 
+            catch(Exception ex)
             {
                 Log.Error(ex, "Something went wrong");
                 throw;
@@ -47,18 +39,11 @@ namespace ModShardLauncher
         }
         public static FileEnumerable<string> LoadAssemblyAsString(string fileName)
         {
-            try 
+            try
             {
                 UndertaleCode code = GetUMTCodeFromFile(fileName);
-
-                // [v2 Task 1] 计时插桩：反汇编段 + 计数
-                string text;
-                using (new HotReload.PhaseClock("disassemble: " + fileName))
-                {
-                    text = code.Disassemble(ModLoader.Data.Variables, ModLoader.Data.CodeLocals.For(code));
-                    HotReload.PerfCounters.CountDecompile();
-                }
-
+                // [v2 Task 4] 读序改道 FastText.Read（终稿→缓存→工作图）
+                string text = HotReload.FastText.Read(code, fileName, PatchingWay.AssemblyAsString);
                 return new(
                     new(
                         fileName,
@@ -68,7 +53,7 @@ namespace ModShardLauncher
                     text.Split("\n")
                 );
             }
-            catch(Exception ex) 
+            catch(Exception ex)
             {
                 Log.Error(ex, "Something went wrong");
                 throw;

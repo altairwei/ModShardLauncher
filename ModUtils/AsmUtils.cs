@@ -46,12 +46,13 @@ namespace ModShardLauncher
         }
         public static string GetAssemblyString(string fileName)
         {
-            try 
+            try
             {
                 UndertaleCode originalCode = GetUMTCodeFromFile(fileName);
-                return originalCode.Disassemble(ModLoader.Data.Variables, ModLoader.Data.CodeLocals.For(originalCode));
+                // [v2 Task 4] 读序改道 FastText.Read（Insert/ReplaceAssemblyString 复用此函数，自动继承）
+                return HotReload.FastText.Read(originalCode, fileName, PatchingWay.AssemblyAsString);
             }
-            catch(Exception ex) 
+            catch(Exception ex)
             {
                 Log.Error(ex, "Something went wrong");
                 throw;
@@ -59,12 +60,21 @@ namespace ModShardLauncher
         }
         public static void SetAssemblyString(string codeAsString, string fileName)
         {
-            try 
+            try
             {
                 UndertaleCode originalCode = GetUMTCodeFromFile(fileName);
+                // [v2 Task 4] 快推：记账不编译；full：原路径 + 脏标记。
+                // 记账口径：RAW 文本 + way=AssemblyAsString——CompileEntry 的 localvar 包装
+                // 只增不删（无新 local 时为空串 no-op），与原直 Assemble 行为相容。
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    HotReload.FastText.RecordFinal(fileName, PatchingWay.AssemblyAsString, codeAsString);
+                    return;
+                }
+                HotReload.FastText.NoteMutated(fileName);
                 originalCode.Replace(Assembler.Assemble(codeAsString, ModLoader.Data));
             }
-            catch(Exception ex) 
+            catch(Exception ex)
             {
                 Log.Error(ex, "Something went wrong");
                 throw;

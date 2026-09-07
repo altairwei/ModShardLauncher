@@ -108,10 +108,60 @@ namespace ModShardLauncher
         /// <param name="codeAsString"></param>
         /// <param name="name"></param>
         /// <returns></returns>
+        /// <summary>[v2 Task 4] 结构 op 同名异体重建前全摘：Code（根 + gml_Script_* 子 wrapper）/
+        /// CodeLocals / Scripts / Functions + KnownSubFunctions 缓存键。
+        /// vendored 编译器的 FunctionDef 复用判定只看 KnownSubFunctions 键与 root.ChildEntries——
+        /// 图里留下任何残迹都会让重建走错路径：留缓存键 → 复用查找在新 root 的空 ChildEntries 上
+        /// ByName 得 null → AssembleExpression NRE（full 模式同名双调同样炸，预存编译器边界）；
+        /// 只摘图不摘键/只原位重编 → 生成带父名后缀的第二子条目（gml_Script_X_X）且旧子悬垂。
+        /// 全摘后走全新建路径 == 首编译语义（探针钉：重建后恰 1 root/1 child/1 Script/1 Function）。</summary>
+        static void StripStructuralEntry(string name)
+        {
+            var removedNames = new HashSet<string>();
+            var removedCodes = new List<UndertaleCode>();
+            foreach (var c in ModLoader.Data.Code
+                .Where(c => c.Name?.Content == name || c.ParentEntry?.Name?.Content == name).ToList())
+            {
+                if (c.Name?.Content != null) removedNames.Add(c.Name.Content);
+                removedCodes.Add(c);
+                ModLoader.Data.Code.Remove(c);
+                var cl = ModLoader.Data.CodeLocals.FirstOrDefault(l => l.Name?.Content == c.Name?.Content);
+                if (cl != null) ModLoader.Data.CodeLocals.Remove(cl);
+            }
+            foreach (var s in ModLoader.Data.Scripts
+                .Where(s => (s.Name?.Content != null && removedNames.Contains(s.Name.Content))
+                    || removedCodes.Contains(s.Code)).ToList())
+                ModLoader.Data.Scripts.Remove(s);
+            foreach (var f in ModLoader.Data.Functions
+                .Where(f => f.Name?.Content != null && removedNames.Contains(f.Name.Content)).ToList())
+                ModLoader.Data.Functions.Remove(f);
+            ModLoader.Data.KnownSubFunctions?.Remove(name);
+        }
+
         public static UndertaleCode AddCode(string codeAsString, string name)
         {
             try
             {
+                // [v2 Task 4] 结构 op 快推门控：同会话重复 AddFunction/AddCode 同名 = 幂等重放。
+                // 语义：结构 op 在快推轮内「立即编译 + 记账本 + 记终稿」——不是延迟到编译阶段：
+                // 新条目必须当场在图里成型（同轮后续 AddInnerCode/AddGameObject/链式读按名引用它）；
+                // 账本一记，Execute 的计划器见哈希相同自然跳过 → 零双编。重放轮账本命中 → 全 skip。
+                // full 模式（非 fast）不走此门——同名双调仍造双条目，与今天一致（API 语义冻结）。
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    var existing = ModLoader.Data.Code.FirstOrDefault(c => c.Name?.Content == name);
+                    if (existing != null)
+                    {
+                        if (HotReload.CompileLedger.Contains(name)
+                            && HotReload.CompileLedger.IsCurrent(name, HotReload.TextHash.Hash(codeAsString)))
+                        {
+                            HotReload.FastText.RecordFinal(name, PatchingWay.GML, codeAsString);
+                            return existing;   // 幂等：同名同体 → 工作图已是最新，零编译
+                        }
+                        // 同名异体（或首轮重放时账本空）：全摘残迹后走下方全新建路径（= 首编译语义）
+                        StripStructuralEntry(name);
+                    }
+                }
                 UndertaleCode code = new();
                 UndertaleCodeLocals locals = new();
                 code.Name = ModLoader.Data.Strings.MakeString(name);
@@ -130,6 +180,13 @@ namespace ModShardLauncher
                 // splash 后闪退的根因，见 CodeUtilsAddFunctionTests。
                 ModLoader.Data.Code.Add(code);
                 code.ReplaceGML(codeAsString, ModLoader.Data);
+                // [v2 Task 4] fast 专属尾账：图已成型，链上后续读得到、计划器（Execute）跳得过
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    HotReload.FastText.NoteMutated(name);
+                    HotReload.FastText.RecordFinal(name, PatchingWay.GML, codeAsString);
+                    HotReload.CompileLedger.MarkCompiled(name, PatchingWay.GML, HotReload.TextHash.Hash(codeAsString));
+                }
                 return code;
             }
             catch
@@ -147,6 +204,26 @@ namespace ModShardLauncher
         {
             try
             {
+                // [v2 Task 4] 结构 op 快推门控（同 AddCode）。asm 记账口径：RAW 输入文本 +
+                // way=AssemblyAsString——gate 判据（RAW 哈希）与终稿回放（CompileEntry 的
+                // localvar 包装 = 本函数下方原逻辑包装）完全同构，无新 local 时退化为直 Assemble。
+                string rawInput = codeAsString;   // 下方包装会就地重赋 codeAsString，记账须锚 RAW
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    var existing = ModLoader.Data.Code.FirstOrDefault(c => c.Name?.Content == name);
+                    if (existing != null)
+                    {
+                        if (HotReload.CompileLedger.Contains(name)
+                            && HotReload.CompileLedger.IsCurrent(name, HotReload.TextHash.Hash(rawInput)))
+                        {
+                            HotReload.FastText.RecordFinal(name, PatchingWay.AssemblyAsString, rawInput);
+                            return existing;   // 幂等：同名同体 → 工作图已是最新，零编译
+                        }
+                        // 同名异体（或首轮重放时账本空）：全摘残迹后走下方全新建路径（asm 侧无
+                        // function 声明/编译器配对，摘除主要是 root+locals+缓存键的对称清理）
+                        StripStructuralEntry(name);
+                    }
+                }
                 UndertaleCode code = new();
                 UndertaleCodeLocals locals = new();
                 code.Name = ModLoader.Data.Strings.MakeString(name);
@@ -164,6 +241,13 @@ namespace ModShardLauncher
                 codeAsString = codeAsString.Insert(codeAsString.IndexOf('\n') + 1, newLocalVarsAsString);
                 code.Replace(Assembler.Assemble(codeAsString, ModLoader.Data));
                 ModLoader.Data.Code.Add(code);
+                // [v2 Task 4] fast 专属尾账（锚 RAW 输入，与 gate 同口径）
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    HotReload.FastText.NoteMutated(name);
+                    HotReload.FastText.RecordFinal(name, PatchingWay.AssemblyAsString, rawInput);
+                    HotReload.CompileLedger.MarkCompiled(name, PatchingWay.AssemblyAsString, HotReload.TextHash.Hash(rawInput));
+                }
                 return code;
             }
             catch
@@ -235,9 +319,8 @@ namespace ModShardLauncher
             try
             {
                 UndertaleCode code = GetUMTCodeFromFile(fileName);
-                GlobalDecompileContext context = new(ModLoader.Data, false);
-
-                return Decompiler.Decompile(code, context);
+                // [v2 Task 4] 读序改道 FastText.Read（Insert/ReplaceGMLString 复用此函数，自动继承）
+                return HotReload.FastText.Read(code, fileName, PatchingWay.GML);
             }
             catch (Exception ex)
             {
@@ -253,6 +336,13 @@ namespace ModShardLauncher
             try
             {
                 UndertaleCode code = GetUMTCodeFromFile(fileName);
+                // [v2 Task 4] 快推：记账不编译（编译阶段按账本统一落图）；full：原路径 + 脏标记
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    HotReload.FastText.RecordFinal(fileName, PatchingWay.GML, codeAsString);
+                    return;
+                }
+                HotReload.FastText.NoteMutated(fileName);
                 code.ReplaceGML(codeAsString, ModLoader.Data);
             }
             catch (Exception ex)
@@ -977,16 +1067,29 @@ namespace ModShardLauncher
             try
             {
                 string newCode = string.Join("\n", fe.ienumerable);
-                // [v2 Task 1] 计时插桩：编译段（ReplaceGML/Assemble 主项）+ 计数
+                // [v2 Task 4] 快推：记账不编译（编译阶段统一按账本/PatchingWay 落图），也不动图
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    HotReload.FastText.RecordFinal(fe.header.fileName, fe.header.patchingWay, newCode);
+                    Log.Information("Successfully patched function {{{0}}} with {{{1}}} (fast)", fe.header.fileName, fe.header.patchingWay.ToString());
+                    return new(
+                        fe.header.fileName,
+                        newCode,
+                        fe.header.patchingWay
+                    );
+                }
+                // [v2 Task 1] 计时插桩：编译段（ReplaceGML/Assemble 主项）+ 计数（full 模式保留）
                 using (new HotReload.PhaseClock("Save compile: " + fe.header.fileName))
                 {
                     switch (fe.header.patchingWay)
                     {
                         case PatchingWay.GML:
+                            HotReload.FastText.NoteMutated(fe.header.fileName);
                             fe.header.originalCode.ReplaceGML(newCode, ModLoader.Data);
                             break;
 
                         case PatchingWay.AssemblyAsString:
+                            HotReload.FastText.NoteMutated(fe.header.fileName);
                             CheckInstructionsVariables(fe.header.originalCode, newCode);
                             string newLocalVarsAsString = AssemblyWrapper.CreateLocalVarAssemblyAsString(fe.header.originalCode);
                             newCode = newCode.Insert(newCode.IndexOf('\n') + 1, newLocalVarsAsString);

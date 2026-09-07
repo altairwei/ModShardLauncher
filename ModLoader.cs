@@ -55,15 +55,15 @@ namespace ModShardLauncher
             try
             {
                 UndertaleCode table = Data.Code.First(t => t.Name.Content == name);
-                GlobalDecompileContext context = new(Data, false);
-                string text = Decompiler.Decompile(table, context);
+                // [v2 Task 4] 读序改道 FastText.Read（快推窗内吃终稿/缓存，full 冷路径同原 Decompile）
+                string text = HotReload.FastText.Read(table, name, PatchingWay.GML);
                 string matchedText = Regex.Match(text, "return (\\[.*\\])").Groups[1].Value;
                 List<string>? tableAsList = JsonConvert.DeserializeObject<List<string>>(matchedText);
 
                 Log.Information(string.Format("Get table: {0}", name.ToString()));
                 return tableAsList;
             }
-            catch(Exception ex) 
+            catch(Exception ex)
             {
                 Log.Error(ex, "Something went wrong");
                 throw;
@@ -75,14 +75,23 @@ namespace ModShardLauncher
             {
                 string ret = JsonConvert.SerializeObject(table).Replace("\n", "");
                 UndertaleCode target = Data.Code.First(t => t.Name.Content == name);
-                GlobalDecompileContext context = new(Data, false);
-                string text = Decompiler.Decompile(target, context);
+                // [v2 Task 4] 快推：读序（终稿/缓存/图）→ 改表 → 记终稿不动图；full：原路径 + 脏标记
+                if (HotReload.FastPushContext.InFastPush)
+                {
+                    string baseText = HotReload.FastText.Read(target, name, PatchingWay.GML);
+                    string edited = Regex.Replace(baseText, "\\[.*\\]", ret);
+                    HotReload.FastText.RecordFinal(name, PatchingWay.GML, edited);
+                    Log.Information("Successfully set table: {0} (fast)", name.ToString());
+                    return;
+                }
+                string text = HotReload.FastText.Read(target, name, PatchingWay.GML);
                 text = Regex.Replace(text, "\\[.*\\]", ret);
+                HotReload.FastText.NoteMutated(name);
                 target.ReplaceGML(text, Data);
 
                 Log.Information(string.Format("Successfully set table: {0}", name.ToString()));
             }
-            catch(Exception ex) 
+            catch(Exception ex)
             {
                 Log.Error(ex, "Something went wrong");
                 throw;
