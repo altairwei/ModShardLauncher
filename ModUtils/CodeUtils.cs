@@ -977,21 +977,26 @@ namespace ModShardLauncher
             try
             {
                 string newCode = string.Join("\n", fe.ienumerable);
-                switch (fe.header.patchingWay)
+                // [v2 Task 1] 计时插桩：编译段（ReplaceGML/Assemble 主项）+ 计数
+                using (new HotReload.PhaseClock("Save compile: " + fe.header.fileName))
                 {
-                    case PatchingWay.GML:
-                        fe.header.originalCode.ReplaceGML(newCode, ModLoader.Data);
-                        break;
+                    switch (fe.header.patchingWay)
+                    {
+                        case PatchingWay.GML:
+                            fe.header.originalCode.ReplaceGML(newCode, ModLoader.Data);
+                            break;
 
-                    case PatchingWay.AssemblyAsString:
-                        CheckInstructionsVariables(fe.header.originalCode, newCode);
-                        string newLocalVarsAsString = AssemblyWrapper.CreateLocalVarAssemblyAsString(fe.header.originalCode);
-                        newCode = newCode.Insert(newCode.IndexOf('\n') + 1, newLocalVarsAsString);
-                        fe.header.originalCode.Replace(Assembler.Assemble(newCode, ModLoader.Data));
-                        break;
+                        case PatchingWay.AssemblyAsString:
+                            CheckInstructionsVariables(fe.header.originalCode, newCode);
+                            string newLocalVarsAsString = AssemblyWrapper.CreateLocalVarAssemblyAsString(fe.header.originalCode);
+                            newCode = newCode.Insert(newCode.IndexOf('\n') + 1, newLocalVarsAsString);
+                            fe.header.originalCode.Replace(Assembler.Assemble(newCode, ModLoader.Data));
+                            break;
 
-                    default:
-                        break;
+                        default:
+                            break;
+                    }
+                    HotReload.PerfCounters.CountCompile();
                 }
                 Log.Information("Successfully patched function {{{0}}} with {{{1}}}", fe.header.fileName, fe.header.patchingWay.ToString());
                 return new(

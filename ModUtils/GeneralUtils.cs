@@ -22,13 +22,21 @@ namespace ModShardLauncher
                 UndertaleCode code = GetUMTCodeFromFile(fileName);
                 GlobalDecompileContext context = new(ModLoader.Data, false);
 
+                // [v2 Task 1] 计时插桩：反编译段 + 计数
+                string text;
+                using (new HotReload.PhaseClock("decompile: " + fileName))
+                {
+                    text = Decompiler.Decompile(code, context);
+                    HotReload.PerfCounters.CountDecompile();
+                }
+
                 return new(
                     new(
                         fileName,
                         code,
                         PatchingWay.GML
                     ),
-                    Decompiler.Decompile(code, context).Split("\n")
+                    text.Split("\n")
                 );
             }
             catch(Exception ex) 
@@ -42,14 +50,22 @@ namespace ModShardLauncher
             try 
             {
                 UndertaleCode code = GetUMTCodeFromFile(fileName);
-                
+
+                // [v2 Task 1] 计时插桩：反汇编段 + 计数
+                string text;
+                using (new HotReload.PhaseClock("disassemble: " + fileName))
+                {
+                    text = code.Disassemble(ModLoader.Data.Variables, ModLoader.Data.CodeLocals.For(code));
+                    HotReload.PerfCounters.CountDecompile();
+                }
+
                 return new(
                     new(
                         fileName,
                         code,
                         PatchingWay.AssemblyAsString
                     ),
-                    code.Disassemble(ModLoader.Data.Variables, ModLoader.Data.CodeLocals.For(code)).Split("\n")
+                    text.Split("\n")
                 );
             }
             catch(Exception ex) 

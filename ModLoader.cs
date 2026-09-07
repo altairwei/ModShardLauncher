@@ -180,6 +180,8 @@ namespace ModShardLauncher
             foreach (ModFile mod in mods)
             {
                 if (!mod.isEnabled) continue;
+                // [v2 Task 1] 计时插桩：每 mod 补丁耗时
+                using var modClock = new HotReload.PhaseClock("PatchMods mod: " + mod.Name);
                 if (!mod.isExisted)
                 {
                     MessageBox.Show(Application.Current.FindResource("ModLostWarning").ToString() + " : " + mod.Name);
@@ -223,15 +225,22 @@ namespace ModShardLauncher
         }
         public static void PatchFile()
         {
+            // [v2 Task 1] 计时插桩：总段 + 四个静态 pass 分段（spec §11.1——拿真实分布校准 v2 收益）
+            using var totalClock = new HotReload.PhaseClock("PatchFile");
             // add new msl log function
-            LogUtils.InjectLog();
-            PatchInnerFile();
-            PatchMods();
+            using (new HotReload.PhaseClock("PatchFile:InjectLog"))
+                LogUtils.InjectLog();
+            using (new HotReload.PhaseClock("PatchFile:PatchInnerFile"))
+                PatchInnerFile();
+            using (new HotReload.PhaseClock("PatchFile:PatchMods"))
+                PatchMods();
             // add the new loot related functions if there is any
-            LootUtils.InjectLootScripts();
+            using (new HotReload.PhaseClock("PatchFile:InjectLootScripts"))
+                LootUtils.InjectLootScripts();
             // Dev 模式静态 pass（Task 8）：槽位池/壳/空房间/live-manager——普通用户编译零注入
             if (HotReload.DevMode.Active)
-                HotReload.LiveStubInjector.Inject(Data, HotReload.DevMode.Quotas);
+                using (new HotReload.PhaseClock("PatchFile:LiveStubInjector"))
+                    HotReload.LiveStubInjector.Inject(Data, HotReload.DevMode.Quotas);
         }
         internal static void PatchInnerFile()
         {

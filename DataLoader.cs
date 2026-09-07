@@ -136,6 +136,8 @@ namespace ModShardLauncher
         private static bool LoadUmt(string filename)
         {
             bool hadWarnings = false;
+            // [v2 Task 1] 计时插桩：读+解压段（含 MD5）
+            using (new HotReload.PhaseClock("LoadUmt(read+decompress)"))
             using (FileStream stream = new(filename, FileMode.Open, FileAccess.Read))
             {
                 if(!CompareChecksum(stream))
@@ -221,10 +223,14 @@ namespace ModShardLauncher
         {
             using (FileStream stream = new(filename + "temp", FileMode.Create, FileAccess.Write))
             {
-                UndertaleIO.Write(stream, data, message =>
+                // [v2 Task 1] 计时插桩：序列化写盘段（162MB 主项）
+                using (new HotReload.PhaseClock("SaveTempWithUmt(serialize)"))
                 {
-                    FileMessageEvent?.Invoke(message);
-                });
+                    UndertaleIO.Write(stream, data, message =>
+                    {
+                        FileMessageEvent?.Invoke(message);
+                    });
+                }
             }
 
             //UndertaleEmbeddedTexture.TexData.ClearSharedStream();
@@ -279,8 +285,12 @@ namespace ModShardLauncher
                 {
                     if (SaveSucceeded)
                     {
-                        if (File.Exists(filename)) File.Delete(filename);
-                        File.Move(filename + "temp", filename);
+                        // [v2 Task 1] 计时插桩：换名落盘段
+                        using (new HotReload.PhaseClock("SaveFile(file move)"))
+                        {
+                            if (File.Exists(filename)) File.Delete(filename);
+                            File.Move(filename + "temp", filename);
+                        }
                     }
                     else
                     {
