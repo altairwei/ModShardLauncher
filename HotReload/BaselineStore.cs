@@ -29,6 +29,10 @@ public static class BaselineStore
     public static CompileRecord? BootBaseline { get; private set; }
     static readonly List<CompileRecord> window = new();
 
+    /// <summary>[v2 Task 3] LockBaseline 成功 pin 且 isNewGameSession 时 raise（参数 = 被 pin 的哈希）。
+    /// 同哈希重锁早退不 raise（§7.7 漂移重放）；窗口 miss 不 raise。订阅侧判定哈希真变才清账本。</summary>
+    public static event Action<string>? BaselineLocked;
+
     public static CompileRecord Register(UndertaleData product, string savedFilePath,
         IReadOnlyList<LiveTextureEntry> scan)
     {
@@ -106,8 +110,12 @@ public static class BaselineStore
         window.Remove(found);
         isNewGameSession = true;
         reason = "";
+        BaselineLocked?.Invoke(found.Hash);   // [v2 Task 3] 新 pin——订阅侧判定哈希是否真变
         return found;
     }
+
+    /// <summary>[v2 Task 3] 测试缝：直接驱动事件（等价于 LockBaseline 命中新哈希）。</summary>
+    internal static void RaiseBaselineLockedForTest(string hash) => BaselineLocked?.Invoke(hash);
 
     public static void Reset()
     {

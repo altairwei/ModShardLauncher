@@ -84,9 +84,48 @@ public class BaselineStoreTests : IDisposable
             map[rec.Product.Strings[rec.Product.Strings.Count - 1].Content]);
     }
 
+    /// <summary>[v2 Task 3] 真实路径：LockBaseline 新 pin 才 raise BaselineLocked（参数 = pin 哈希）；
+    /// 同哈希重锁早退不 raise；窗口 miss 不 raise。FastPushContext.OnBaselineLocked 订阅侧
+    /// 判定哈希真变才清账本（该语义在 LedgerClearTriggerTests 驱动事件层验证）。</summary>
+    [Fact]
+    public void LockBaseline_NewPin_Raises_OldPinSilent()
+    {
+        string? raised = null;
+        void Handler(string h) => raised = h;
+        BaselineStore.BaselineLocked += Handler;
+        try
+        {
+            string p1 = NewTmp();
+            var r1 = BaselineStore.Register(Load(p1), p1, new List<LiveTextureEntry>());
+            string p2 = NewTmp();
+            var d2 = Load(p2);
+            AppendByte(p2, 7);
+            var r2 = BaselineStore.Register(d2, p2, new List<LiveTextureEntry>());
+
+            Assert.NotNull(BaselineStore.LockBaseline(r1.Hash, out _, out _));   // 首次 pin：raise
+            Assert.Equal(r1.Hash, raised);
+
+            raised = null;
+            Assert.NotNull(BaselineStore.LockBaseline(r1.Hash, out _, out _));   // 同哈希重锁：不 raise
+            Assert.Null(raised);
+
+            Assert.NotNull(BaselineStore.LockBaseline(r2.Hash, out _, out _));   // 异哈希新 pin：raise
+            Assert.Equal(r2.Hash, raised);
+
+            raised = null;
+            Assert.Null(BaselineStore.LockBaseline("DEADBEEF", out _, out _));   // 窗口 miss：不 raise
+            Assert.Null(raised);
+        }
+        finally
+        {
+            BaselineStore.BaselineLocked -= Handler;
+        }
+    }
+
     public void Dispose()
     {
         BaselineStore.Reset();
+        FastPushContext.ResetForTest();   // LockBaseline 事件会经 FastPushContext.OnBaselineLocked 动 lastPinnedHash
         foreach (var p in tmps) try { File.Delete(p); } catch { }
     }
 }

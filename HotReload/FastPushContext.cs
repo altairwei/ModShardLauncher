@@ -15,10 +15,12 @@ public static class FastPushContext
     static readonly HashSet<string> roundDirty = new();
     static readonly HashSet<string> vanillaNames = new();
     static string? cachedHash;
+    static string? lastPinnedHash;
 
     static FastPushContext()
     {
         DataLoader.DataLoaded += OnDataReloaded;
+        BaselineStore.BaselineLocked += OnBaselineLocked;
     }
 
     internal static void BeginPush()
@@ -41,7 +43,7 @@ public static class FastPushContext
     internal static bool IsDirty(string entryName) => roundDirty.Contains(entryName);
 
     /// <summary>每次成功装载（LoadUmt 尾触发，无参——读 DataLoader.data）：滞后归零、
-    /// vanilla 名集快照刷新、脏集清空、哈希变化 → 缓存整体作废。</summary>
+    /// vanilla 名集快照刷新、脏集清空、哈希变化 → 缓存整体作废、账本清零（触发①：工作图替换）。</summary>
     internal static void OnDataReloaded()
     {
         if (!string.Equals(cachedHash, DataLoader.VanillaHash, StringComparison.Ordinal))
@@ -55,7 +57,22 @@ public static class FastPushContext
         if (DataLoader.data?.Code != null)
             foreach (var c in DataLoader.data.Code)
                 if (c?.Name?.Content != null) vanillaNames.Add(c.Name.Content);
-        // Task 3 Step 5 在此接入 CompileLedger.Clear()（任务按序执行时账本文件已存在）
+        CompileLedger.Clear();   // 触发①：工作图换血，旧账本全部作废
+    }
+
+    /// <summary>LockBaseline 命中新哈希（触发②）。
+    /// 首次 pin 只记不追（该会话首个基线与账本同生，装载时已清过）；此后 pin 到
+    /// 不同哈希 = 新 boot 镜像（游戏重载了新文件）→ 账本/缓存整体作废（救援层按新基线重判）。
+    /// 同哈希重锁走 LockBaseline 早退，事件根本不 raise（§7.7 漂移重放不清账本）。</summary>
+    static void OnBaselineLocked(string hash)
+    {
+        if (lastPinnedHash != null && lastPinnedHash != hash)
+        {
+            CompileLedger.Clear();
+            DecompileCache.Clear();
+            // Task 7 在此补 ModFingerprint.Reset() / VanillaTripwire.Reset()
+        }
+        lastPinnedHash = hash;
     }
 
     internal static bool IsVanillaName(string entryName) => vanillaNames.Contains(entryName);
@@ -68,6 +85,7 @@ public static class FastPushContext
         roundDirty.Clear();
         vanillaNames.Clear();
         cachedHash = null;
+        lastPinnedHash = null;
         DecompileCache.Clear();
     }
 }
