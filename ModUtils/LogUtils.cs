@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Serilog;
 using Newtonsoft.Json;
 using System.IO;
@@ -64,14 +65,19 @@ else
     instance_destroy(global._msl_log.timer);
 }";
 
+        // —— [v2 Task 5] 结构守卫（快推同图重放幂等；全量从精源跑守卫永不命中 → 行为逐字节等价）——
+        // 事件按 (obj,type,sub)、函数按名、文本注入按哨兵（反编译现图查「本 MSL 注入在不在」，
+        // MatchAll 再插一行 = 每轮增殖）。注入文本全部为编译期常量——按名跳过不存在变体滞留问题。
         UndertaleGameObject timer = Msl.AddObject("o_msl_timer", isPersistent: true);
-        Msl.AddNewEvent(timer, @"
+        if (!timer.Events[(int)EventType.Create].Any(e => e.EventSubtype == 0))
+            Msl.AddNewEvent(timer, @"
 func = -4;
 end_time = 0;
-cumulative_time = 0;", 
+cumulative_time = 0;",
             EventType.Create, 0);
 
-        Msl.AddNewEvent(timer, @"
+        if (!timer.Events[(int)EventType.Step].Any(e => e.EventSubtype == 0))
+            Msl.AddNewEvent(timer, @"
 cumulative_time += delta_time / 1000000;
 if (cumulative_time > end_time)
 {
@@ -80,11 +86,12 @@ if (cumulative_time > end_time)
         script_execute(func)
     }
     instance_destroy();
-}", 
+}",
             EventType.Step, 0);
 
         UndertaleGameObject log = Msl.AddObject("o_msl_log", isPersistent: true);
-        Msl.AddNewEvent(log, @"
+        if (!log.Events[(int)EventType.Create].Any(e => e.EventSubtype == 0))
+            Msl.AddNewEvent(log, @"
 size = 1000000
 buf = buffer_create(size, buffer_wrap, 1);
 cur_size = 0
@@ -98,11 +105,21 @@ timer = -4
 ", 
             EventType.Create, 0);
 
-        Msl.AddFunction(mslLogSave, "scr_msl_log_save");
-        Msl.AddFunction(mslLog, "scr_msl_log");
-        Msl.LoadGML(Msl.EventName("o_gameLoader", EventType.Create, 0))
-            .MatchAll()
-            .InsertBelow(@"global._msl_log = instance_create_depth(0, 0, -100, o_msl_log);")
-            .Save();       
+        if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_log_save"))
+            Msl.AddFunction(mslLogSave, "scr_msl_log_save");
+        if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_log"))
+            Msl.AddFunction(mslLog, "scr_msl_log");
+
+        // 哨兵 = 注入行里 MSL 自有对象名（vanilla 该条目必无）：FastText.Read 读现图
+        //（fast：终稿/缓存优先；full：反编译当前图）——已含注入行即整链跳过
+        string loaderCreate = Msl.EventName("o_gameLoader", EventType.Create, 0);
+        var loaderEntry = ModLoader.Data.Code.First(c => c.Name.Content == loaderCreate);
+        if (!HotReload.FastText.Read(loaderEntry, loaderCreate, PatchingWay.GML).Contains("o_msl_log"))
+        {
+            Msl.LoadGML(loaderCreate)
+                .MatchAll()
+                .InsertBelow(@"global._msl_log = instance_create_depth(0, 0, -100, o_msl_log);")
+                .Save();
+        }
     }
 }

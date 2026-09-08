@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Serilog;
 using Newtonsoft.Json;
 using System.IO;
@@ -410,26 +411,47 @@ namespace ModShardLauncher
     return 1;
 }";
 
-            Msl.AddFunction(mslItemsFunction, "scr_msl_resolve_items");
-            Msl.AddFunction(mslRefFunction, "scr_msl_resolve_refence_table");
-            Msl.AddFunction(mslLootGuaranteedItemsFunction, "scr_msl_resolve_guaranteed_items");
-            Msl.AddFunction(mslLootRandomItemsFunction, "scr_msl_resolve_random_items");
-            Msl.AddFunction(mslLootFunction, "scr_msl_resolve_loot_table");
+            // —— [v2 Task 5] 结构守卫（快推同图重放幂等；全量从精源跑守卫永不命中 → 行为逐字节等价）——
+            // 函数按名（注入文本为编译期常量，按名跳过无变体滞留问题）；
+            // 注入行按哨兵（反编译现图查「本 MSL 注入在不在」——再插即每轮翻倍）
+            if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_resolve_items"))
+                Msl.AddFunction(mslItemsFunction, "scr_msl_resolve_items");
+            if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_resolve_refence_table"))
+                Msl.AddFunction(mslRefFunction, "scr_msl_resolve_refence_table");
+            if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_resolve_guaranteed_items"))
+                Msl.AddFunction(mslLootGuaranteedItemsFunction, "scr_msl_resolve_guaranteed_items");
+            if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_resolve_random_items"))
+                Msl.AddFunction(mslLootRandomItemsFunction, "scr_msl_resolve_random_items");
+            if (ModLoader.Data.Code.All(x => x.Name.Content != "scr_msl_resolve_loot_table"))
+                Msl.AddFunction(mslLootFunction, "scr_msl_resolve_loot_table");
 
-            Msl.LoadGML("gml_Object_o_chest_p_Alarm_1")
-                .MatchFrom("script_execute")
-                .InsertBelow("scr_msl_resolve_loot_table(other, 0)")
-                .Save();
+            if (!AlreadyInjected("gml_Object_o_chest_p_Alarm_1"))
+                Msl.LoadGML("gml_Object_o_chest_p_Alarm_1")
+                    .MatchFrom("script_execute")
+                    .InsertBelow("scr_msl_resolve_loot_table(other, 0)")
+                    .Save();
                 
-            Msl.LoadGML("gml_Object_c_container_Other_10")
-                .MatchFrom("script_execute")
-                .InsertBelow("scr_msl_resolve_loot_table(other, 0)")
-                .Save();
+            if (!AlreadyInjected("gml_Object_c_container_Other_10"))
+                Msl.LoadGML("gml_Object_c_container_Other_10")
+                    .MatchFrom("script_execute")
+                    .InsertBelow("scr_msl_resolve_loot_table(other, 0)")
+                    .Save();
                 
-            Msl.LoadGML("gml_Object_o_unit_Destroy_0")
-                .MatchAll()
-                .InsertBelow("scr_msl_resolve_loot_table(self, 1)")
-                .Save();
+            if (!AlreadyInjected("gml_Object_o_unit_Destroy_0"))
+                Msl.LoadGML("gml_Object_o_unit_Destroy_0")
+                    .MatchAll()
+                    .InsertBelow("scr_msl_resolve_loot_table(self, 1)")
+                    .Save();
+        }
+
+        /// <summary>[v2 Task 5] 哨兵 = 注入行调用的 MSL 自有函数名（vanilla 目标条目必无）：
+        /// FastText.Read 读现图（fast：终稿/缓存优先；full：反编译当前图）——已含即整链跳过。</summary>
+        static bool AlreadyInjected(string entryName)
+        {
+            var entry = ModLoader.Data.Code.FirstOrDefault(c => c.Name.Content == entryName);
+            if (entry == null) return false;
+            return HotReload.FastText.Read(entry, entryName, PatchingWay.GML)
+                .Contains("scr_msl_resolve_loot_table");
         }
     }
     public static partial class Msl

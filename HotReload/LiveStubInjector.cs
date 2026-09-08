@@ -141,7 +141,18 @@ public static class LiveStubInjector
             Msl.AddNewEvent(obj, gml, type, sub);
             return;
         }
+        // [v2 Task 5] 账本跳编：快推重放且事件体未变（上一轮已直编并记账）→ 零编译。
+        // 变体则重编并记账——下轮同体可跳。stub 直编不进 FinalTextStore（Execute 不该碰
+        // 它——双编）；stub 轮的图变化由 BuildBatch 的 boot-vs-图 diff 推送。
+        // 角落（诚实边界）：mod 也 Save 同一 stub 条目 → 每轮多一次直编（终态以 mod 终稿
+        // 为准，语义正确；共抢概率极低，白编成本可接受，不做额外协调）。
+        string entryName = code.Name?.Content ?? "";
+        if (FastPushContext.InFastPush && CompileLedger.IsCurrent(entryName, TextHash.Hash(gml)))
+            return;
+        FastPushContext.NoteDirty(entryName);
         code.ReplaceGML(gml, ModLoader.Data);
+        if (FastPushContext.InFastPush)
+            CompileLedger.MarkCompiled(entryName, PatchingWay.GML, TextHash.Hash(gml));
     }
 
     static void EnsureManagerInstance(UndertaleData data, UndertaleGameObject manager)
@@ -182,7 +193,8 @@ public static class LiveStubInjector
         "if (global.msl_blank_spr_first >= 0 && global.msl_blank_path_first >= 0)\n" +
         "    msl_live_report($4D000000 | (global.msl_blank_spr_first << 8) | global.msl_blank_path_first);";
 
-    static string GameStartGml(int blankSprites, int blankPaths) =>
+    // [v2 Task 5] internal（非 private）：单元测试计算配额变化后的期望账本哈希用
+    internal static string GameStartGml(int blankSprites, int blankPaths) =>
         "global.msl_blank_spr_first = -1;\n" +
         "global.msl_blank_spr_count = 0;\n" +
         $"repeat ({blankSprites})\n" +

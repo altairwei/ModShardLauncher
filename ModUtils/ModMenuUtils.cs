@@ -98,13 +98,16 @@ public class UIComponent
     private static void AddCheckBox(string name, string associatedGlobal, int defaultValue, string sectionName, int index)
     {
         UndertaleGameObject checkbox = Msl.AddObject($"o_msl_component_{index}", "s_point", "o_checkbox", isVisible:true, isAwake:true);
-        Msl.AddNewEvent(checkbox, @$"event_inherited()
+        // [v2 Task 5] 事件按 (obj,type,sub) 守卫（AddObject 自守卫；重放第二轮 AddNewEvent 重复即抛）
+        if (!checkbox.Events[(int)EventType.Create].Any(e => e.EventSubtype == 0))
+            Msl.AddNewEvent(checkbox, @$"event_inherited()
 ini_open(""msl_menu_mod.ini"");
 global.{associatedGlobal} = ini_read_real(""{sectionName}"", ""{associatedGlobal}"", {defaultValue})
 ini_close();
 text = ""{name}""
 selected = global.{associatedGlobal}", EventType.Create, 0);
-        Msl.AddNewEvent(checkbox, $"event_inherited()\nglobal.{associatedGlobal} = selected", EventType.Other, 11);
+        if (!checkbox.Events[(int)EventType.Other].Any(e => e.EventSubtype == 11))
+            Msl.AddNewEvent(checkbox, $"event_inherited()\nglobal.{associatedGlobal} = selected", EventType.Other, 11);
     }
     private static void AddDropDown(string associatedGlobal, string[] dropDownValues, int index)
     {
@@ -116,7 +119,9 @@ selected = global.{associatedGlobal}", EventType.Create, 0);
             tmp += $"\nds_list_add(optionsNamesList, \"{value}\")";
             tmp += $"\nds_list_add(optionsValuesList, \"{value}\")";
         }
-        Msl.AddNewEvent(checkbox, $"global.{associatedGlobal} = ds_list_find_value(optionsValuesList, optionIndex)\nevent_user(14)", EventType.Other, 11);
+        // [v2 Task 5] 事件按 (obj,type,sub) 守卫（同 AddCheckBox）
+        if (!checkbox.Events[(int)EventType.Other].Any(e => e.EventSubtype == 11))
+            Msl.AddNewEvent(checkbox, $"global.{associatedGlobal} = ds_list_find_value(optionsValuesList, optionIndex)\nevent_user(14)", EventType.Other, 11);
         string other24 = $@"event_inherited()
 {tmp}
 if (variable_global_exists(""{associatedGlobal}""))
@@ -129,13 +134,15 @@ if ((optionIndex == -1))
     global.{associatedGlobal} = ds_list_find_value(optionsValuesList, 0)
 }}
         ";
-        Msl.AddNewEvent(checkbox, other24, EventType.Other, 24);
+        if (!checkbox.Events[(int)EventType.Other].Any(e => e.EventSubtype == 24))
+            Msl.AddNewEvent(checkbox, other24, EventType.Other, 24);
     }
     private static void AddSlider(string associatedGlobal, (int, int) sliderValues, int defaultValue, string sectionName, int index)
     {
         UndertaleGameObject slider = Msl.AddObject($"o_msl_component_{index}", "s_music_slide", "o_slider", isVisible:true, isAwake:true);
+        if (!slider.Events[(int)EventType.Create].Any(e => e.EventSubtype == 0))
         Msl.AddNewEvent(
-            slider, 
+            slider,
             @$"ini_open(""msl_menu_mod.ini"");
 global.{associatedGlobal} = math_round(ini_read_real(""{sectionName}"", ""{associatedGlobal}"", {defaultValue}))
 ini_close();
@@ -149,15 +156,19 @@ scr_guiPositionOffsetUpdate(id, scr_convertToNewRange(positionPercent, positionM
 scr_guiLayoutOffsetUpdate(id, 0, -2)", 
             EventType.Create, 0
         );
-        Msl.AddNewEvent(slider, $"global.{associatedGlobal} = math_round(scr_convertToNewRange(positionPercent, valueMin, valueMax, 0, 1))", EventType.Other, 10);
-        Msl.AddNewEvent(slider, @"event_inherited()
+        // [v2 Task 5] 事件按 (obj,type,sub) 守卫（同 AddCheckBox）
+        if (!slider.Events[(int)EventType.Other].Any(e => e.EventSubtype == 10))
+            Msl.AddNewEvent(slider, $"global.{associatedGlobal} = math_round(scr_convertToNewRange(positionPercent, valueMin, valueMax, 0, 1))", EventType.Other, 10);
+        if (!slider.Events[(int)EventType.Other].Any(e => e.EventSubtype == 11))
+            Msl.AddNewEvent(slider, @"event_inherited()
 with (guiParent)
 {
     valueLeft = math_round(scr_convertToNewRange(other.positionPercent, other.valueMin, other.valueMax, 0, 1)) 
 }",
-            EventType.Other, 11);
+                EventType.Other, 11);
         
-        Msl.AddNewEvent(slider, "event_inherited()", EventType.Other, 25);
+        if (!slider.Events[(int)EventType.Other].Any(e => e.EventSubtype == 25))
+            Msl.AddNewEvent(slider, "event_inherited()", EventType.Other, 25);
     }
 }
 internal class Menu
@@ -175,7 +186,10 @@ public static partial class Msl
     internal static void CreateMenu(List<Menu> menus)
     {
         UndertaleGameObject menu = AddObject("o_msl_menu_mod", "s_settings_button_down", "o_settings_tab", isVisible:true, isAwake:true);
-        AddNewEvent(menu, $"event_inherited()\ntext = \"MODS\"", EventType.Create, 0);
+        // —— [v2 Task 5] 结构守卫（快推同图重放幂等；全量从精源跑守卫永不命中 → 行为逐字节等价）——
+        // 事件按 (obj,type,sub)、文本注入按哨兵（组件侧守卫见 AddCheckBox/AddDropDown/AddSlider）
+        if (!menu.Events[(int)EventType.Create].Any(e => e.EventSubtype == 0))
+            AddNewEvent(menu, $"event_inherited()\ntext = \"MODS\"", EventType.Create, 0);
 
         string injectedOther10 = "";
         string injectedOther11 = "";
@@ -264,7 +278,8 @@ with (guiParent)
     {injectedOther10}
 }}
         ";
-        AddNewEvent(menu, other10, EventType.Other, 10);
+        if (!menu.Events[(int)EventType.Other].Any(e => e.EventSubtype == 10))
+            AddNewEvent(menu, other10, EventType.Other, 10);
 
         string other11 = $@"event_inherited();
 ini_open(""msl_menu_mod.ini"");
@@ -272,7 +287,8 @@ ini_open(""msl_menu_mod.ini"");
 ini_close();
 event_user(3);
         ";
-        AddNewEvent(menu, other11, EventType.Other, 11);
+        if (!menu.Events[(int)EventType.Other].Any(e => e.EventSubtype == 11))
+            AddNewEvent(menu, other11, EventType.Other, 11);
 
         string other12 = $@"event_inherited();
 with (o_checkbox) 
@@ -291,18 +307,27 @@ ini_open(""msl_menu_mod.ini"");
 {injectedOther12}
 ini_close();
         ";
-        AddNewEvent(menu, other12, EventType.Other, 12);
+        if (!menu.Events[(int)EventType.Other].Any(e => e.EventSubtype == 12))
+            AddNewEvent(menu, other12, EventType.Other, 12);
         
         string other13 = $@"event_inherited();
 ini_open(""msl_menu_mod.ini"");
 {injectedOther13}
 ini_close();
 ";
-        AddNewEvent(menu, other13, EventType.Other, 13);
+        if (!menu.Events[(int)EventType.Other].Any(e => e.EventSubtype == 13))
+            AddNewEvent(menu, other13, EventType.Other, 13);
 
-        LoadGML("gml_Object_o_settings_menu_Create_0")
-            .Apply(x => InsertNewMenu(x, "o_msl_menu_mod"))
-            .Save();
+        // 哨兵 = MSL 自有对象名（vanilla 该条目必无）：已含即整链跳过（InsertNewMenu
+        // 对已注入体再跑 = _tabButtonsArray 追加第二个同名项）
+        string settingsCreate = "gml_Object_o_settings_menu_Create_0";
+        var settingsEntry = ModLoader.Data.Code.First(c => c.Name.Content == settingsCreate);
+        if (!HotReload.FastText.Read(settingsEntry, settingsCreate, PatchingWay.GML).Contains("o_msl_menu_mod"))
+        {
+            LoadGML(settingsCreate)
+                .Apply(x => InsertNewMenu(x, "o_msl_menu_mod"))
+                .Save();
+        }
     }
     private static IEnumerable<string> InsertNewMenu(IEnumerable<string> lines, string name)
     {

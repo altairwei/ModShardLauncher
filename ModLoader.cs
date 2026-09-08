@@ -184,6 +184,11 @@ namespace ModShardLauncher
             Disclaimers = new();
             List<ModFile> mods = ModInfos.Instance.Mods;
             Menus = new();
+            // [v2 Task 5] EnableMods 跨轮累积增殖点：每轮 Add(mod.Name) 会把重复名逐轮
+            // 堆进列表并存回 Settings.json（v1 全量编译下已存在此累积，快推同图重放放大）。
+            // 清零重填 = 「当前启用集合」（比累积更接近本意）；LoadSettings 在 PatchMods
+            // 之前已消费完该列表恢复启用态，清零不影响它
+            Main.Settings.EnableMods.Clear();
 
             Stopwatch watch = Stopwatch.StartNew();
             foreach (ModFile mod in mods)
@@ -225,12 +230,30 @@ namespace ModShardLauncher
             if (Activator.CreateInstance(type) is not Weapon weapon) return;
             weapon.SetDefaults();
             (string, string, string) strs = weapon.AsString();
-            Weapons.Insert(Weapons.IndexOf("SWORDS - BLADES;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;") + 1, strs.Item1);
-            WeaponDescriptions.Insert(WeaponDescriptions.IndexOf(";;SWORDS;;;;;;SWORDS;SWORDS;;;;") + 1, weapon.Name + ";" + string.Join(";", weapon.NameList.Values));
-            WeaponDescriptions.Insert(WeaponDescriptions.IndexOf(";weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;") + 1,
-                weapon.Name + ";" + string.Join(";", weapon.WeaponDescriptions.Values));
-            WeaponDescriptions.Insert(WeaponDescriptions.IndexOf(";weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;") + 1,
-                weapon.Name + ";He;;;It;She;She;She;She;He;;;;");
+            // [v2 Task 5] 整行等值守卫（按整行判不按前缀判——同名不同参数武器不被误跳）：
+            // 静态表只在 Initalize()（LoadFile 尾）刷新，快推轮不 LoadFile → 第二轮起
+            // 四路 Insert 重复插行。装备表三行按「本轮应插份数」判：懒惰武器
+            // NameList ≡ WeaponDescriptions（全 "None"）时 name/desc 两行同文但各有其锚位
+            //（GetWeapon 按锚位序枚举依赖两行俱在），全局整行 Contains 会漏插第二行。
+            // 残留：mod 移除武器后旧行滞留静态表与图（槽位泄漏同类死代码，全量编译收编）。
+            if (!Weapons.Contains(strs.Item1))
+                Weapons.Insert(Weapons.IndexOf("SWORDS - BLADES;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;") + 1, strs.Item1);
+
+            string nameRow = weapon.Name + ";" + string.Join(";", weapon.NameList.Values);
+            string descRow = weapon.Name + ";" + string.Join(";", weapon.WeaponDescriptions.Values);
+            string pronounRow = weapon.Name + ";He;;;It;She;She;She;She;He;;;;";
+            (string Row, string Anchor)[] descRows =
+            {
+                (nameRow, ";;SWORDS;;;;;;SWORDS;SWORDS;;;;"),
+                (descRow, ";weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;weapon_desc;"),
+                (pronounRow, ";weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;weapon_pronoun;"),
+            };
+            foreach (var (row, anchor) in descRows)
+            {
+                int copies = descRows.Count(r => r.Row == row);   // 本轮应插份数（同文行各有其锚位）
+                if (WeaponDescriptions.Count(l => l == row) < copies)
+                    WeaponDescriptions.Insert(WeaponDescriptions.IndexOf(anchor) + 1, row);
+            }
         }
         public static void PatchFile()
         {

@@ -1031,16 +1031,27 @@ scr_draw_text_doublecolor((global.cameraWidth / 2), ((global.cameraHeight / 2) +
                 delta += 30;
             }
 
-            AddNewEvent(o_msl_mod_disclaimer, disclaimerText, EventType.Draw, 0);
+            // —— [v2 Task 5] 结构守卫（快推同图重放幂等；全量从精源跑守卫永不命中 → 行为逐字节等价）——
+            // 事件按 (obj,type,sub)（AddNewEvent 重复即抛）；房间/层按名；实例按 Layer 侧对象名
+            //（EnsureManagerInstance 同款：Layer 侧为准）。Draw 文本随 Credits 列表变化——守卫下
+            // 变更滞留旧文本（编译期精源重跑自愈；cosmetic 边界，见 StaticPassIdempotencyTests）。
+            if (!o_msl_mod_disclaimer.Events[(int)EventType.Draw].Any(e => e.EventSubtype == 0))
+                AddNewEvent(o_msl_mod_disclaimer, disclaimerText, EventType.Draw, 0);
 
-            UndertaleRoom room = AddRoom("r_msl_mod_disclaimer");
+            UndertaleRoom room = ModLoader.Data.Rooms.FirstOrDefault(r => r.Name.Content == "r_msl_mod_disclaimer")
+                ?? AddRoom("r_msl_mod_disclaimer");
 
             //room.AddLayerBackground("NewBackgroundLayer");
-            UndertaleRoom.Layer layerInstance = room.AddLayerInstance("NewInstancesLayer");
+            UndertaleRoom.Layer layerInstance = room.Layers.FirstOrDefault(l => l.LayerName.Content == "NewInstancesLayer")
+                ?? room.AddLayerInstance("NewInstancesLayer");
 
 
-            UndertaleRoom.GameObject overlay = room.AddGameObject(layerInstance, "o_init_overlay");
-            room.AddGameObject(layerInstance, $"o_msl_mod_disclaimer");
+            UndertaleRoom.GameObject overlay = layerInstance.InstancesData.Instances
+                .FirstOrDefault(g => g.ObjectDefinition?.Name?.Content == "o_init_overlay");
+            if (overlay == null)
+                overlay = room.AddGameObject(layerInstance, "o_init_overlay");
+            if (!layerInstance.InstancesData.Instances.Any(g => g.ObjectDefinition?.Name?.Content == "o_msl_mod_disclaimer"))
+                room.AddGameObject(layerInstance, $"o_msl_mod_disclaimer");
 
             ModLoader.AddDisclaimer("r_msl_mod_disclaimer", overlay);
             return room;
@@ -1079,7 +1090,14 @@ scr_draw_text_doublecolor((global.cameraWidth / 2), ((global.cameraHeight / 2) +
 roomNext = {roomName}
 animationSpeed = 0.015
 koeficient = 5";
-                disclaimer.Item2.CreationCode = AddCode(disclaimerCreationCode, $"disclaimer_creation_{index++}");
+                // [v2 Task 5] 结构守卫：CC 条目按名。full 模式直接复用（生产恒从精源跑不达此，
+                // 双跑等价由复用保证）；fast 模式仍走 AddCode——T4 门接管（同体零编跳过 /
+                // 列表变更异体 → 摘旧重建，CC 体可变不能按名死跳）
+                string ccName = $"disclaimer_creation_{index++}";
+                var existingCc = ModLoader.Data.Code.FirstOrDefault(c => c.Name?.Content == ccName);
+                disclaimer.Item2.CreationCode = (existingCc != null && !HotReload.FastPushContext.InFastPush)
+                    ? existingCc
+                    : AddCode(disclaimerCreationCode, ccName);
                 if (index > 3)
                 {
                     break;
