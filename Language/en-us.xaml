@@ -51,4 +51,6 @@
     <sys:String x:Key="FastPushNoSession">Fast push works only on a live session; use a full compile to write to disk</sys:String>
     <sys:String x:Key="FastPushFingerprintChanged">Enabled mod set changed - do a full compile</sys:String>
     <sys:String x:Key="FastPushVanillaChanged">data.win changed - reopen and do a full compile</sys:String>
+    <sys:String x:Key="LagExitPromptTitle">Unsaved hot-push changes</sys:String>
+    <sys:String x:Key="LagExitPromptText">{0} change(s) live in memory only (not saved to data.win). Run a full compile before exiting?&#x0a;&#x0a;Yes = compile and exit&#x0a;No = exit anyway&#x0a;Cancel = stay in the editor</sys:String>
 </ResourceDictionary>

@@ -49,4 +49,6 @@
     <sys:String x:Key="FastPushNoSession">快推只对活会话生效；用完整编译写盘</sys:String>
     <sys:String x:Key="FastPushFingerprintChanged">mod 集合变了——完整编译一次</sys:String>
     <sys:String x:Key="FastPushVanillaChanged">data.win 变了——重新打开并完整编译</sys:String>
+    <sys:String x:Key="LagExitPromptTitle">未写盘的热推改动</sys:String>
+    <sys:String x:Key="LagExitPromptText">有 {0} 处改动只在内存里（未写盘）。退出前正式编译一次？&#x0a;&#x0a;是 = 编译并退出&#x0a;否 = 直接退出&#x0a;取消 = 留在编辑器</sys:String>
 </ResourceDictionary>

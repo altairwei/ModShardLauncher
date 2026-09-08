@@ -219,7 +219,9 @@ public static class HotPipeline
                 // [B][body][exit][tail]——调用面 = 子入口 +4，S2②/S2④）；裸体形态（无子条目，
                 // 旧 AddFunction("return 42;") 风格）在产品里本就 runtime 不可调用——fail-closed。
                 if (entry.Product.ChildEntries.Count == 0)
-                    throw new OverlayException($"{entry.Name}: 非函数声明形态（无子条目）——槽载荷需 wrapper——需重启");
+                    // [v2 Task 8] 文案诚实化：裸体形态在产品里本就 runtime 不可调用——重启救不了
+                    // 载荷形态问题，修 mod 源码（function 声明）才行。
+                    throw new OverlayException($"{entry.Name}: 非函数声明形态（无子条目）——槽载荷需 function 声明 wrapper；修复载荷或移除该改动后重试（重启无法解决）");
                 slotTargeted = true;
                 targetEntry = alloc.AllocateScript(ScriptSlotKey(entry.Name));
             }
@@ -698,13 +700,15 @@ public static class HotPipeline
     static AssetRef ResolveAsset(AssetRef a, UndertaleData boot, UndertaleData product, SessionState alloc)
     {
         if (!Enum.TryParse<AssetKind>(a.Kind, out var kind))
-            throw new OverlayException($"asset ref kind '{a.Kind}' 未知——需重启");
+            // [v2 Task 8] 文案诚实化：未知 kind 是载荷/数据形态问题——重启后同样失败。
+            throw new OverlayException($"asset ref kind '{a.Kind}' 未知——修复载荷或移除该改动后重试（重启无法解决）");
         if (a.Index < BootCount(boot, kind))
         {
             a.RuntimeIndex = a.Index;
             return a;
         }
-        string name = a.Name ?? throw new OverlayException($"{a.Kind}[{a.Index}] 无名字，无法路由——需重启");
+        // [v2 Task 8] 文案诚实化：无名字无法路由是载荷形态问题——重启后同样失败。
+        string name = a.Name ?? throw new OverlayException($"{a.Kind}[{a.Index}] 无名字，无法路由——修复载荷或移除该改动后重试（重启无法解决）");
         a.RuntimeIndex = kind switch
         {
             AssetKind.Sprite => alloc.AllocateSprite(name),
@@ -841,6 +845,9 @@ public static class HotPipeline
             TextureLoader.LiveScan, BaselineStore.BootBaseline.Scan);
         if (build.Batch == null)
         {
+            // [v2 Task 8] 快推语境补位：批构建失败文案（含「需重启」类建议）以写盘流为预设
+            // 语境——快推未写盘时照做重启会空手而归；前置「先完整编译」指引让两类语境都诚实。
+            if (!register) result.Failures.Add("快推未写盘——先做一次完整编译并重启游戏");
             foreach (var f in build.Failures) result.Failures.Add(f);
             result.RequiresRestart = build.RequiresRestart;
             return result;

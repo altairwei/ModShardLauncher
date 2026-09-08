@@ -214,8 +214,52 @@ namespace ModShardLauncher
             if (sender is MyToggleButton button) button.MyButton.IsChecked = false;
         }
 
-        private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        private async void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            if (HotReload.LagPrompt.NeedsPrompt(HotReload.FastPushContext.LagCount))
+            {
+                // [v2 Task 8] 滞后退出提示：Yes=编译并退出；No=直接退出（明示丢弃）；Cancel=中止关闭
+                string msg = string.Format(
+                    Application.Current.FindResource("LagExitPromptText").ToString(),
+                    HotReload.FastPushContext.LagCount);
+                var title = Application.Current.FindResource("LagExitPromptTitle").ToString();
+                var r = MessageBox.Show(msg, title, MessageBoxButton.YesNoCancel, MessageBoxImage.Question,
+                    MessageBoxResult.Yes);
+                if (r == MessageBoxResult.Yes)
+                {
+                    e.Cancel = true;   // 本次关闭中止——编译完再 Close() 走干净路径
+                    try
+                    {
+                        await Controls.ModInfos.Instance.CompileDataWinFlow(useLastSavePath: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 编译失败也照常退出（错误已由 CompileDataWinFlow 内部弹窗+日志兜底；
+                        // 脏图由下次会话全量编译重建，不留滞留风险）
+                        Log.Error(ex, "[fast-push] 退出前编译失败");
+                    }
+                    finally
+                    {
+                        // 修正裁决（计划 T8）：编译失败时 LagCount 仍 >0 → Close() 再触发本事件会
+                        // 二次弹提示——用户在 Yes 分支已表态退出，不拦第二遍（成功路径尾部
+                        // LoadFile 触发①已清零，此处赋值无害）。
+                        HotReload.FastPushContext.LagCount = 0;
+                        Close();
+                    }
+                    return;
+                }
+                if (r == MessageBoxResult.No)
+                {
+                    HotReload.FastPushContext.LagCount = 0;   // 用户明示丢弃 → 放行关闭
+                }
+                else
+                {
+                    // Cancel：中止关闭留在编辑器（计划意图「Cancel=中止关闭」——草稿漏了
+                    // e.Cancel=true，只 return 不拦会直接关窗且跳过下方退出钩子）
+                    e.Cancel = true;
+                    return;
+                }
+            }
             HotReload.DevMode.OnAppExit();
             // Task 15：Dev 组件随 MSL 退出卸载（游戏运行中则留置——Installer 自己判）
             if (HotReload.DevMode.Active && !string.IsNullOrEmpty(DataLoader.dataPath))

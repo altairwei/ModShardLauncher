@@ -31,4 +31,6 @@
     <sys:String x:Key="FastPushNoSession">Быстрая отправка работает только с активной сессией; используйте полную компиляцию для записи на диск</sys:String>
     <sys:String x:Key="FastPushFingerprintChanged">Набор включённых модов изменился — сделайте полную компиляцию</sys:String>
     <sys:String x:Key="FastPushVanillaChanged">data.win изменился — откройте заново и сделайте полную компиляцию</sys:String>
+    <sys:String x:Key="LagExitPromptTitle">Несохранённые изменения</sys:String>
+    <sys:String x:Key="LagExitPromptText">{0} изменени(й/я/е) живут только в памяти (не записаны в data.win). Выполнить полную компиляцию перед выходом?&#x0a;&#x0a;Да = скомпилировать и выйти&#x0a;Нет = выйти&#x0a;Отмена = остаться в редакторе</sys:String>
 </ResourceDictionary>
