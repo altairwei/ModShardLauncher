@@ -767,10 +767,16 @@ public static class HotPipeline
     /// 先锁（③ 窗口命中即 pin 出窗，此后逐出不可触）后注册；锁/连接失败的早退路径仍注册
     /// （「编译过就有记录」——未来 boot 依赖不回归）。</summary>
     public static HotPushResult BuildAndPush(UndertaleData product, string savedFilePath)
+        => BuildAndPush(product, savedFilePath, register: true);   // 2 参入口（v1 全量流/E2E）原样转调
+
+    /// <summary>[v2 Task 6] 3 参重载：register=false = 快推免写盘变体——全部 BaselineStore.Register
+    /// 跳过（写盘基线只由真实写盘点维护），失败路径记「先做一次完整编译」指引。既有 2 参调用方
+    /// 逐字节不变。</summary>
+    public static HotPushResult BuildAndPush(UndertaleData product, string savedFilePath, bool register)
     {
         var result = new HotPushResult();
         if (!DevMode.Active) return result;
-        try { return BuildAndPushCore(product, savedFilePath); }
+        try { return BuildAndPushCore(product, savedFilePath, register); }
         catch (Exception ex)
         {
             // fix #31（09-04 19:31 真机形态）：上方契约「任何一步失败 = 纯写盘降级」此前只对
@@ -784,7 +790,7 @@ public static class HotPipeline
         }
     }
 
-    static HotPushResult BuildAndPushCore(UndertaleData product, string savedFilePath)
+    static HotPushResult BuildAndPushCore(UndertaleData product, string savedFilePath, bool register)
     {
         var result = new HotPushResult();
 
@@ -806,25 +812,28 @@ public static class HotPipeline
                 session = LiveSession.ForRunningGame(DevMode.Quotas, DevMode.ShellBuckets);
                 if (!session.TryConnect())
                 {
-                    BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+                    if (register) BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+                    else result.Failures.Add("快推未写盘——先做一次完整编译并重启游戏");
                     result.Failures.Add(session.LastError);
                     return result;
                 }
             }
             catch (Exception ex)
             {
-                BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+                if (register) BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+                else result.Failures.Add("快推未写盘——先做一次完整编译并重启游戏");
                 result.Failures.Add(ex.Message);   // ReportResult 统一加「无热会话」语境——此处再拼会双前缀（fix #31）
                 return result;
             }
         }
         if (BaselineStore.BootBaseline == null)
         {
-            BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+            if (register) BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);
+            else result.Failures.Add("快推未写盘——先做一次完整编译并重启游戏");
             result.Failures.Add("boot baseline 未锁定");
             return result;
         }
-        BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);   // fix #29：锁后注册
+        if (register) BaselineStore.Register(product, savedFilePath, TextureLoader.LiveScan);   // fix #29：锁后注册
 
         result.Attempted = true;
         var sw = Stopwatch.StartNew();

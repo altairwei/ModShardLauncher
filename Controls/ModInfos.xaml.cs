@@ -36,6 +36,13 @@ namespace ModShardLauncher.Controls
                 return;
             }
 
+            // [v2 Task 6] 裁决 9：快推让工作图带漂移后，全量编译必须先回精源（spec §4）——
+            // 否则 PatchFile 重放在漂移图上进行（文本链错基 + 双重补丁 + 缓存面与图失配）。
+            // 无快推过的会话恒 false → 零成本跳过；LoadFile 尾部顺带触发①清账本/换缓存——
+            // 全量编译本就要走到。
+            if (HotReload.FastPushCore.NeedsPristineReload)
+                await DataLoader.LoadFile(DataLoader.dataPath, true);
+
             try
             {
                 bool patchSucess = false;
