@@ -41,6 +41,10 @@ public sealed class LiveHarness : IDisposable
         LiveSession.Current?.Dispose();
         LiveSession.ForRunningGameOverride = null;
         BaselineStore.Reset();
+        // [v2 Task 9] 快推静态复位：跨测试的账本/终稿/指纹/缓存互相污染会让快推场景从脏态起跑
+        FastPushContext.ResetForTest();   // 含 DecompileCache.Clear + 指纹/绊线 Reset + lastPinnedHash=null
+        CompileLedger.Clear();
+        FinalTextStore.ResetRound();
 
         sandbox = Sandbox.Create(testName);
 
@@ -71,6 +75,20 @@ public sealed class LiveHarness : IDisposable
             s.TargetStart = start;
             return s;
         };
+    }
+
+    /// <summary>快推姿态（Task 9）：工作图 = 沙箱文件的独立副本（≠ BootBaseline.Product 对象，
+    /// alias 规则），并复刻「全量编译尾部 LoadFile」后的静态状态（VanillaHash + OnDataReloaded
+    /// 快照/账本清/缓存换）。随后 CompileAndPushWith 直接驱动 Task 6 的轮核心（PushCompiled）。</summary>
+    public void FastPushPosture()
+    {
+        var wg = LoadFresh(Sandbox.DataWin);
+        DataLoader.data = wg;
+        DataLoader.dataPath = Sandbox.DataWin;
+        DataLoader.savedDataPath = Sandbox.DataWin;
+        using (var s = new FileStream(Sandbox.DataWin, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            DataLoader.VanillaHash = DataLoader.ComputeFileHash(s);
+        FastPushContext.OnDataReloaded();
     }
 
     /// <summary>热推一轮（生产入口原样）：另读 product 副本 → 换探针函数体 → 落盘 → BuildAndPush。

@@ -544,5 +544,62 @@ public class E2ETests : IDisposable
             "M15 复合赋值新实例变量热语义断裂（期望 7）\n" + h.Diagnostics());
     }
 
+    // ---- [v2 Task 9] 快推不变量场景：终稿→编译→推送→账本→滞后管线（CompileAndPushWith 缝）。
+    // .sml 驱动的 PatchFile 重放需 ModInfos UI 宿主——由冒烟清单覆盖（真机）。
+    // 同编等同性实证（2026-09-08 取证）：同文本重编在同条目上 ≠ boot 形态——首编即生成
+    // 撞名消歧子 wrapper（gml_Script_X → gml_Script_X_X），根指令流唯一差异 = fnref 操作数
+    // 按名比较 → 恒 1 漂移。场景 (b) 改回清零 / (c) 消失回滚的 lag==0 断言因此 withheld，
+    // 待用户裁决修复方向（摘子重编 / 判据按内容 / 接受恒 1）——证据与代码见任务报告。
+
+    /// <summary>场景 (a)：同终稿双推 → 第二轮零编译 + 滞后不变；随后漂移重推语义
+    /// （改 222 → 编 1 lag 1；同 222 再推 → 零编译、滞后不变、推送仍含既有漂移——VM 幂等）。</summary>
+    [E2EFact]
+    public void FastPush_IdenticalFinals_SecondPushZeroCompileAndNoNewPush()
+    {
+        h.Boot("fp_ident");
+        h.FastPushPosture();
+        // boot 源串 = TestDataBuilder 播种时 AddFunction 的同一文本。同编等同性已实证不成立
+        //（首编即撞名消歧，lag 恒 1）——下方 r1 滞后断言取实证值；核心不变量（零编译/滞后稳定）不受影响。
+        const string bootSrc = "function " + TestDataBuilder.ProbeScript + "() { return 111; }";
+        var r1 = FastPushCore.CompileAndPushWith((TestDataBuilder.ProbeScript, PatchingWay.GML, bootSrc));
+        Assert.True(r1.Attempted && r1.Succeeded, string.Join("；", r1.Failures) + "\n" + h.Diagnostics());
+        Assert.Equal(1, r1.CompiledEntries);   // 档1：账本空 → 编 1（spec 既定成本）
+        Assert.Equal(1, r1.LagEntries);        // 首编撞名消歧 → wrapper fnref 指向消歧子名（实证恒 1）
+        var r2 = FastPushCore.CompileAndPushWith((TestDataBuilder.ProbeScript, PatchingWay.GML, bootSrc));
+        Assert.Equal(0, r2.CompiledEntries);   // 同哈希 → 零编译（本场景核心不变量）
+        Assert.Equal(r1.LagEntries, r2.LagEntries);   // 滞后不变
+        // 漂移重推语义（计划裁决，勿当 bug 修）：改 222 → 编 1；同 222 再推 → 零编译、
+        // 滞后不变、推送仍含既有漂移（VM 幂等）。
+        var r3 = FastPushCore.CompileAndPushWith((TestDataBuilder.ProbeScript, PatchingWay.GML,
+            "function " + TestDataBuilder.ProbeScript + "() { return 222; }"));
+        Assert.True(r3.Succeeded, string.Join("；", r3.Failures) + "\n" + h.Diagnostics());
+        Assert.Equal(1, r3.CompiledEntries);
+        Assert.Equal(1, r3.LagEntries);
+        Assert.Equal(r3.LagEntries, r3.PushedEntries);   // 图领先盘的量 == 推送量
+        var r4 = FastPushCore.CompileAndPushWith((TestDataBuilder.ProbeScript, PatchingWay.GML,
+            "function " + TestDataBuilder.ProbeScript + "() { return 222; }"));
+        Assert.Equal(0, r4.CompiledEntries);
+        Assert.Equal(r3.LagEntries, r4.LagEntries);
+        Assert.True(h.WaitResult("222") == "222", h.Diagnostics());   // VM 执行 222
+    }
+
+    /// <summary>场景 (d)：同 entry 双 mod 叠加 → 单编译 + last-writer-wins（终稿 B 胜出）。</summary>
+    [E2EFact]
+    public void FastPush_TwoModsStackSameEntry_SingleCompileFinalTextWins()
+    {
+        h.Boot("fp_stack");
+        h.FastPushPosture();
+        // mod A 写 probe=333；mod B（后跑，LoadGML 链读终稿再改写）→ 终稿 B
+        var r1 = FastPushCore.CompileAndPushWith(
+            (TestDataBuilder.ProbeScript, PatchingWay.GML,
+                "function " + TestDataBuilder.ProbeScript + "() { return 333; }"),   // A final
+            (TestDataBuilder.ProbeScript, PatchingWay.GML,
+                "function " + TestDataBuilder.ProbeScript + "() { return 444; }"));  // B final
+        Assert.True(r1.Succeeded, string.Join("；", r1.Failures) + "\n" + h.Diagnostics());
+        Assert.Equal(1, r1.CompiledEntries);   // 同 entry 只编一次
+        Assert.Equal(1, r1.LagEntries);
+        Assert.True(h.WaitResult("444") == "444", h.Diagnostics());   // VM 执行 B 终稿
+    }
+
     public void Dispose() => h.Dispose();
 }
