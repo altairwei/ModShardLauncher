@@ -35,6 +35,9 @@
                 </controls:MyToggleButton>
                 <Border BorderBrush="#43424D" BorderThickness="2"/>
             </Grid>
+            <Button x:Name="FastPushButton" Content="{DynamicResource FastPushButton}" Height="24"
+                    Margin="4,40,4,0" Padding="8,0" Click="FastPush_Click" Visibility="Collapsed"
+                    HorizontalAlignment="Left" ToolTip="{DynamicResource FastPushButtonTooltip}" />
             <TextBlock x:Name="LiveStatus" Text="" Foreground="Gray" Margin="4,68,4,0"
                        VerticalAlignment="Top" HorizontalAlignment="Left"/>
             <controls:MyItemsControl MaxHeight="672" Height="672" x:Name="ModList"

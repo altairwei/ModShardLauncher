@@ -20,6 +20,9 @@ namespace ModShardLauncher.Controls
         {
             InitializeComponent();
             Instance = this;
+            // [v2 Task 7] 快推按钮只随 Dev 模式出现（Main.Refresh 重建 ModInfos → ctor 再跑 → 跟随设置；
+            // Release 默认 DevMode=false → Collapsed，视觉零差）
+            FastPushButton.Visibility = HotReload.DevMode.Active ? Visibility.Visible : Visibility.Collapsed;
         }
         private async void Open_Click(object sender, EventArgs e)
         {
@@ -106,6 +109,39 @@ namespace ModShardLauncher.Controls
         public void SetLiveStatus(string msg)
         {
             if (LiveStatus != null) LiveStatus.Text = msg;
+        }
+
+        // [v2 Task 7] 快推按钮：同步调 RunPush（轮内是 CPU 工作，无 async 面）+ 状态行三态反馈。
+        // 状态行文案沿用 v1 硬编码中文先例（ReportResult 同款）；按钮 ToolTip 走 Language 键。
+        private void FastPush_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var r = HotReload.FastPushCore.RunPush();
+                sw.Stop();
+                SetFastPushStatus(r, sw.ElapsedMilliseconds);
+            }
+            catch (Exception ex)   // #31 兜底同款：带栈落日志 + 状态行
+            {
+                Log.Error(ex, "[fast-push] 未捕获异常");
+                SetLiveStatus("快推异常：" + ex.GetType().Name);
+            }
+        }
+
+        void SetFastPushStatus(HotReload.FastPushOutcome r, long ms)
+        {
+            if (r.Rejected)
+            {
+                SetLiveStatus("快推拒绝：" + r.RejectionReason);
+                return;
+            }
+            string msg = r.Succeeded
+                ? $"快推成功：编 {r.CompiledEntries} entry，推 {r.PushedEntries} entry，{ms} ms"
+                : $"快推失败：{string.Join("；", r.Failures)}";
+            if (r.LagEntries > 0) msg += $"｜内存领先磁盘 {r.LagEntries} 处";
+            SetLiveStatus(msg);
+            Log.Information("[fast-push] {msg}", msg);
         }
 
         private void Server_Click(object sender, EventArgs e)

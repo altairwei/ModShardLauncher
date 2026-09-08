@@ -45,4 +45,10 @@
     <sys:String x:Key="Minimize">Minimize</sys:String>
     <sys:String x:Key="Loading">Loading...</sys:String>
     <sys:String x:Key="ServerStart">Mod Interface Server starts at port {0}.</sys:String>
+    <sys:String x:Key="FastPushButton">Fast Push</sys:String>
+    <sys:String x:Key="FastPushButtonTooltip">Push only changed code entries to the live game (no full compile, no save)</sys:String>
+    <sys:String x:Key="FastPushNoSavedData">Do a full compile first (fast push needs a saved baseline)</sys:String>
+    <sys:String x:Key="FastPushNoSession">Fast push works only on a live session; use a full compile to write to disk</sys:String>
+    <sys:String x:Key="FastPushFingerprintChanged">Enabled mod set changed - do a full compile</sys:String>
+    <sys:String x:Key="FastPushVanillaChanged">data.win changed - reopen and do a full compile</sys:String>
 </ResourceDictionary>

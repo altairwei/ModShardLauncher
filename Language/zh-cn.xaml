@@ -43,4 +43,10 @@
     <sys:String x:Key="Minimize">最小化</sys:String>
     <sys:String x:Key="Loading">加载中...</sys:String>
     <sys:String x:Key="ServerStart">模组交互服务器已在{0}端口上启动.</sys:String>
+    <sys:String x:Key="FastPushButton">快推</sys:String>
+    <sys:String x:Key="FastPushButtonTooltip">只把改动的代码条目热推给运行中的游戏（不全量编译、不写盘）</sys:String>
+    <sys:String x:Key="FastPushNoSavedData">先做一次完整编译（快推需要写盘基线）</sys:String>
+    <sys:String x:Key="FastPushNoSession">快推只对活会话生效；用完整编译写盘</sys:String>
+    <sys:String x:Key="FastPushFingerprintChanged">mod 集合变了——完整编译一次</sys:String>
+    <sys:String x:Key="FastPushVanillaChanged">data.win 变了——重新打开并完整编译</sys:String>
 </ResourceDictionary>

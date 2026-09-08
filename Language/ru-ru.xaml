@@ -25,4 +25,10 @@
     <sys:String x:Key="VersionDifferentWarning">Версия мода отличается от версии игры, возможно, это вызовет сбой. Вы всё равно хотите загрузить его?</sys:String>
     <sys:String x:Key="ModLostWarning">Файл мода отсутствует</sys:String>
     <sys:String x:Key="PackFailedWarning">Ошибка упаковки: проверьте ошибки сборки исходников мода. Компиляция пропущена.</sys:String>
+    <sys:String x:Key="FastPushButton">Быстрая отправка</sys:String>
+    <sys:String x:Key="FastPushButtonTooltip">Отправить в игру только изменённые записи кода (без полной компиляции и сохранения)</sys:String>
+    <sys:String x:Key="FastPushNoSavedData">Сначала сделайте полную компиляцию (для быстрой отправки нужна сохранённая база)</sys:String>
+    <sys:String x:Key="FastPushNoSession">Быстрая отправка работает только с активной сессией; используйте полную компиляцию для записи на диск</sys:String>
+    <sys:String x:Key="FastPushFingerprintChanged">Набор включённых модов изменился — сделайте полную компиляцию</sys:String>
+    <sys:String x:Key="FastPushVanillaChanged">data.win изменился — откройте заново и сделайте полную компиляцию</sys:String>
 </ResourceDictionary>

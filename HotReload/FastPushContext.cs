@@ -58,6 +58,8 @@ public static class FastPushContext
             foreach (var c in DataLoader.data.Code)
                 if (c?.Name?.Content != null) vanillaNames.Add(c.Name.Content);
         CompileLedger.Clear();   // 触发①：工作图换血，旧账本全部作废
+        ModFingerprint.Reset();   // [v2 Task 7] 指纹/绊线与账本同生命周期——新图首推重新注册
+        VanillaTripwire.Reset();
     }
 
     /// <summary>LockBaseline 命中新哈希（触发②）。
@@ -70,7 +72,8 @@ public static class FastPushContext
         {
             CompileLedger.Clear();
             DecompileCache.Clear();
-            // Task 7 在此补 ModFingerprint.Reset() / VanillaTripwire.Reset()
+            ModFingerprint.Reset();   // [v2 Task 7] 新 boot 镜像 = 新会话形态——指纹/绊线同账本作废
+            VanillaTripwire.Reset();
         }
         lastPinnedHash = hash;
     }
@@ -87,5 +90,7 @@ public static class FastPushContext
         cachedHash = null;
         lastPinnedHash = null;
         DecompileCache.Clear();
+        ModFingerprint.Reset();
+        VanillaTripwire.Reset();
     }
 }

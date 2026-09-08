@@ -24,8 +24,9 @@ public sealed class FastPushOutcome
 
 /// <summary>[v2 Task 6] 快推编排（生产入口 RunPush + 轮核心 PushCompiled + E2E 缝）。
 /// RunPush 前置门全过才动图：Dev 开 / 有写盘基线 / 有工作图 / 活会话（#25——会话在但目标死
-/// 也拒：重连是写盘流 BuildAndPushCore 的职责，快推零编译预算不容白烧）。指纹/绊线门在
-/// Task 7 挂进 CheckGates。</summary>
+/// 也拒：重连是写盘流 BuildAndPushCore 的职责，快推零编译预算不容白烧）。[Task 7] 指纹/绊线
+/// 门在 RunPush 体里 LoadFiles 之后（mod 集合是新装载集合）——不在 CheckGates（那里的集合
+/// 状态还是上一轮的）。</summary>
 public static class FastPushCore
 {
     /// <summary>裁决 9 判据（headless 可测）：工作图带快推漂移（滞后>0）或被快推碰过
@@ -39,19 +40,23 @@ public static class FastPushCore
         var sw = Stopwatch.StartNew();
         string? reject = CheckGates();
         if (reject != null)
-        {
-            sw.Stop();
-            Log.Information("[live] fast-push rejected: {reason}", reject);
-            Controls.ModInfos.Instance?.SetLiveStatus("快推未执行：" + reject);
-            return new FastPushOutcome { Rejected = true, RejectionReason = reject, ElapsedMs = sw.ElapsedMilliseconds };
-        }
+            return Reject(sw, reject);
 
         var outcome = new FastPushOutcome { Attempted = true };
         try
         {
             // 重载 .sml（LoadFiles 自带保留启用态：old.isEnabled 继承）
             ModLoader.LoadFiles();
-            // [v2 Task 7 挂点] ModFingerprint.RecordBirth() + VanillaTripwire.Record()（LoadFiles 后：集合状态是新集合）
+
+            // [v2 Task 7] 绊线/指纹门：LoadFiles 后（集合是新装载集合）、BeginPush 前。
+            // 顺序铁律：Verify 先、Record 后——反序自证清白。拒绝 = Rejected 轮（不编译不推送）。
+            if (!ModFingerprint.Verify())
+                return Reject(sw, "mod 集合变了——完整编译一次");
+            if (!VanillaTripwire.Verify(out string why))
+                return Reject(sw, why);
+            ModFingerprint.RecordBirth();
+            VanillaTripwire.Record();
+
             var round = PushCompiled();
             return round;
         }
@@ -63,6 +68,15 @@ public static class FastPushCore
             outcome.ElapsedMs = sw.ElapsedMilliseconds;
             return outcome;
         }
+    }
+
+    /// <summary>门/绊线拒绝同款出口：日志 + 状态行 + Rejected 产出（未 Attempt、不编译不推送）。</summary>
+    static FastPushOutcome Reject(Stopwatch sw, string reason)
+    {
+        sw.Stop();
+        Log.Information("[live] fast-push rejected: {reason}", reason);
+        Controls.ModInfos.Instance?.SetLiveStatus("快推未执行：" + reason);
+        return new FastPushOutcome { Rejected = true, RejectionReason = reason, ElapsedMs = sw.ElapsedMilliseconds };
     }
 
     /// <summary>轮核心（RunPush 与 E2E 缝共享）。runPatchFile=false：E2E 缝形态——跳过轮首
